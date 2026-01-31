@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "omni_host",
+    "omni_engine",
+    "omni_plugin_host",
+    "omni_shared",
+]
+
+# Shared profile settings for performance
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,11 @@
+[package]
+name = "omni_engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+cpal = "0.17.1"
+crossbeam-channel = "0.5.15"
+petgraph = "0.8.3"
+rayon = "1.11.0"

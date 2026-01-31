@@ -1,0 +1,15 @@
+[package]
+name = "omni_shared"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+raw-window-handle = "0.6"
+thiserror = "1.0"
+# We will use 'shared_memory' for mapping regions
+shared_memory = "0.12" 
+# Ringbuf for lock-free communication within shared memory
+ringbuf = "0.3" 

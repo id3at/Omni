@@ -1,0 +1,11 @@
+[package]
+name = "omni_plugin_host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+omni_shared = { path = "../omni_shared" }
+anyhow = "1.0"
+shared_memory = "0.12"
+bincode = "1.3"
+base64 = "0.22.1"
