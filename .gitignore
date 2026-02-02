@@ -5,3 +5,4 @@
 *.log
 .gemini
 tomic-linux/
+dummy_plugin/
