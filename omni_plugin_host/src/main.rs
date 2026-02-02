@@ -217,9 +217,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut _window: Option<winit::window::Window> = None;
 
     event_loop.run(move |event, target| { 
-        target.set_control_flow(ControlFlow::Wait);
+        target.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(16)
+        ));
 
         match event {
+            Event::AboutToWait => {
+                 // Check Timers
+                let guard = plugin.lock().unwrap();
+                if let Some(ref p) = *guard {
+                    unsafe { p.check_timers(); }
+                }
+            }
             Event::UserEvent(CustomEvent::Initialize(_plugin_id, shmem_config)) => {
                  let mut f = log_file.lock().unwrap();
                  let _ = writeln!(f, "[Main] Processing Initialize...");
@@ -300,9 +309,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                println!("[Event] Window CloseRequested received!");
                 // Cleanup Plugin GUI
                 let guard = plugin.lock().unwrap();
                 if let Some(ref p) = *guard {
+                    println!("[GUI] Destroying editor...");
                     unsafe {
                         p.destroy_editor();
                     }
@@ -310,10 +321,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 _window = None; // Drop window closes it
             }
+            Event::WindowEvent { event, .. } => {
+               // println!("[Event] Other WindowEvent: {:?}", event); // Too noisy usually, but okay for now if commented out
+            }
             _ => {}
         }
     })?;
 
     Ok(())
 }
-

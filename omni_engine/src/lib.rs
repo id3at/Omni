@@ -379,15 +379,22 @@ impl AudioEngine {
                     }
                      
                      // Interleave back to data
-                     // Note: We clamp to avoid clipping? No, just raw output for now.
-                     // cpal expects f32.
-                     let (l_chan, r_chan) = master_mix.split_at(frames);
+                     // master_mix is already Interleaved (L, R, L, R...)
+                     // cpal data buffer is also Interleaved (L, R, L, R...)
                      let gain = f32::from_bits(master_gain_callback.load(Ordering::Relaxed));
 
                      for i in 0..frames {
-                         data[i * channels] = l_chan[i] * gain;
-                         if channels > 1 {
-                             data[i * channels + 1] = r_chan[i] * gain;
+                         // Read from Interleaved Master Mix
+                         let left = master_mix[i * 2];
+                         let right = master_mix[i * 2 + 1];
+
+                         // Write to Interleaved Output
+                         if channels == 2 {
+                             data[i * 2] = left * gain;
+                             data[i * 2 + 1] = right * gain;
+                         } else {
+                             // Downmix for Mono output? Or just Left?
+                             data[i] = (left + right) * 0.5 * gain;
                          }
                      }
                 },

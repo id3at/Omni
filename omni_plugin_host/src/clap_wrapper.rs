@@ -12,7 +12,8 @@ use clap_sys::events::{
     clap_event_param_value, CLAP_EVENT_PARAM_VALUE,
 };
 use clap_sys::ext::params::{clap_plugin_params, CLAP_EXT_PARAMS, clap_param_info};
-use clap_sys::ext::gui::{clap_plugin_gui, CLAP_EXT_GUI, clap_window, CLAP_WINDOW_API_X11}; // Assumes clap-sys generic enough
+use clap_sys::ext::gui::{clap_plugin_gui, CLAP_EXT_GUI, clap_window, CLAP_WINDOW_API_X11};
+use clap_sys::ext::timer_support::{clap_plugin_timer_support, clap_host_timer_support, CLAP_EXT_TIMER_SUPPORT};
 use winit::window::Window;
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 
@@ -23,6 +24,18 @@ use std::ffi::{CString, CStr, c_void};
 use std::sync::{Arc, Mutex};
 use std::os::raw::c_char;
 use anyhow::{Result, anyhow};
+use std::collections::HashMap;
+use lazy_static::lazy_static; // Need lazy_static or OnceLock. Actually simple Mutex works if global.
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+
+static NEXT_TIMER_ID: AtomicU32 = AtomicU32::new(1);
+// Timer ID -> (Period Ms, Next Run Time)
+type TimerMap = HashMap<u32, (u32, std::time::Instant)>;
+
+lazy_static::lazy_static! {
+    static ref ACTIVE_TIMERS: Mutex<TimerMap> = Mutex::new(HashMap::new());
+}
 
 use omni_shared::MidiNoteEvent;
 
@@ -39,13 +52,47 @@ unsafe impl Send for ClapPlugin {}
 unsafe impl Sync for ClapPlugin {}
 
 // Host Callbacks
-extern "C" fn host_get_extension(_host: *const clap_host, _extension_id: *const c_char) -> *const c_void {
-    ptr::null()
-}
 
 extern "C" fn host_request_restart(_host: *const clap_host) {}
 extern "C" fn host_request_process(_host: *const clap_host) {}
 extern "C" fn host_request_callback(_host: *const clap_host) {}
+
+// Timer Callbacks
+unsafe extern "C" fn host_register_timer(_host: *const clap_host, period_ms: u32, timer_id: *mut u32) -> bool {
+    let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    *timer_id = id;
+    eprintln!("[Timer] Registered timer ID: {} with period: {}ms", id, period_ms);
+    if let Ok(mut timers) = ACTIVE_TIMERS.lock() {
+        timers.insert(id, (period_ms, std::time::Instant::now() + Duration::from_millis(period_ms as u64)));
+    }
+    true
+}
+
+unsafe extern "C" fn host_unregister_timer(_host: *const clap_host, timer_id: u32) -> bool {
+    eprintln!("[Timer] Unregistered timer ID: {}", timer_id);
+    if let Ok(mut timers) = ACTIVE_TIMERS.lock() {
+        timers.remove(&timer_id);
+    }
+    true
+}
+
+static HOST_TIMER_SUPPORT: clap_host_timer_support = clap_host_timer_support {
+    register_timer: Some(host_register_timer),
+    unregister_timer: Some(host_unregister_timer),
+};
+
+extern "C" fn host_get_extension(_host: *const clap_host, extension_id: *const c_char) -> *const c_void {
+    unsafe {
+        let id_cstr = CStr::from_ptr(extension_id);
+        // Compare bytes properly. CLAP headers define macros as C strings (null terminated).
+        // CLAP_EXT_TIMER_SUPPORT is b"clap.timer-support\0" in clap-sys.
+        if id_cstr == CLAP_EXT_TIMER_SUPPORT {
+            eprintln!("[Host] Providing CLAP_EXT_TIMER_SUPPORT");
+            return &HOST_TIMER_SUPPORT as *const _ as *const c_void;
+        }
+    }
+    ptr::null()
+}
 
 // Event list context for input events
 struct EventListContext {
@@ -384,6 +431,7 @@ impl ClapPlugin {
         if !show(self.plugin) {
              return Err(anyhow!("gui.show failed"));
         }
+        eprintln!("[CLAP] gui.show called successfully");
 
         Ok(())
     }
@@ -396,13 +444,43 @@ impl ClapPlugin {
         };
 
         if !gui_ext.is_null() {
+            eprintln!("[CLAP] Calling gui.hide...");
             // Hide first
             if let Some(hide) = (*gui_ext).hide {
                 hide(self.plugin);
             }
+            eprintln!("[CLAP] Calling gui.destroy...");
             // Then destroy
             if let Some(destroy) = (*gui_ext).destroy {
                 destroy(self.plugin);
+            }
+            eprintln!("[CLAP] gui.destroy finished.");
+        }
+    }
+
+    pub unsafe fn check_timers(&self) {
+        let now = std::time::Instant::now();
+        let mut timers_to_fire = Vec::new();
+
+        if let Ok(mut timers) = ACTIVE_TIMERS.lock() {
+            for (id, (period, next_run)) in timers.iter_mut() {
+                if now >= *next_run {
+                    timers_to_fire.push(*id);
+                    *next_run = now + Duration::from_millis(*period as u64);
+                }
+            }
+        }
+
+        if !timers_to_fire.is_empty() {
+             if let Some(get_ext) = (*self.plugin).get_extension {
+                let timer_ext = get_ext(self.plugin, CLAP_EXT_TIMER_SUPPORT.as_ptr() as *const i8) as *const clap_plugin_timer_support;
+                if !timer_ext.is_null() {
+                    if let Some(on_timer) = (*timer_ext).on_timer {
+                        for id in timers_to_fire {
+                            on_timer(self.plugin, id);
+                        }
+                    }
+                }
             }
         }
     }

@@ -44,6 +44,46 @@ impl Default for TrackData {
     }
 }
 
+// --- Custom Widgets ---
+fn knob_ui(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>) -> egui::Response {
+    let desired_size = egui::vec2(30.0, 30.0);
+    let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::drag());
+
+    if response.dragged() {
+        // Standard DAW behavior: Drag up to increase, down to decrease.
+        // Also allow horizontal: Right to increase.
+        let delta = response.drag_delta().x + -response.drag_delta().y; 
+        let speed = 0.005; // Slower speed for precision
+        *value = (*value + delta * speed).clamp(*range.start(), *range.end());
+        response.mark_changed();
+    }
+
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact_selectable(&response, true);
+        let center = rect.center();
+        let radius = rect.width() / 2.0;
+
+        // Draw Background Arc
+        ui.painter().circle(center, radius, visuals.bg_fill, visuals.bg_stroke);
+
+        // Draw Active Arc
+        let start_angle = -135.0f32.to_radians();
+        let end_angle = 135.0f32.to_radians();
+        let normalized = egui::remap_clamp(*value, *range.start()..=*range.end(), 0.0..=1.0);
+        let current_angle = egui::lerp(start_angle..=end_angle, normalized);
+        
+        // Indicator Line
+        let indicator_len = radius * 0.8;
+        let indicator_pos = center + egui::Vec2::new(current_angle.sin(), -current_angle.cos()) * indicator_len;
+        
+        ui.painter().line_segment([center, indicator_pos], (2.0, visuals.fg_stroke.color));
+    }
+    
+    response
+}
+
+// #[derive(serde::Deserialize, serde::Serialize)]
+// #[serde(default)] // Disabled for now to fix channel initialization issues
 pub struct OmniApp {
     is_playing: bool,
     master_volume: f32,
@@ -236,33 +276,38 @@ impl eframe::App for OmniApp {
 
                 ui.add_space(20.0);
                 if ui.button("+ Add Track").clicked() {
-                    if let Some(ref engine) = self.engine {
-                        // User requested ability to load plugin manually.
-                        // For now, we still default to the known plugin path to ensure it works,
-                        // but this is triggered by the user action.
-                        // Ideally checking if file exists or using a file dialog.
-                         let plugin_path = "/home/id3at/Moje/omni/tomic-linux/tomic_rust.clap";
-                         if let Err(e) = engine.add_track(Some(plugin_path)) {
-                             eprintln!("Failed to add track: {}", e);
-                         } else {
-                             // Sync UI state
-                             self.tracks.push(TrackData { 
-                                 name: "Plugin".to_string(), 
-                                 active_clip: Some(0), // UI: Show Clip 0 as active
-                                 ..Default::default() 
-                             });
-                             
-                             // Engine: Trigger Clip 0 immediately
-                             let new_track_idx = self.tracks.len() - 1;
-                             let _ = self.messenger.send(EngineCommand::TriggerClip { 
-                                 track_index: new_track_idx, 
-                                 clip_index: 0 
-                             });
-                         }
-                    } else {
-                         eprintln!("Engine not available");
-                    }
+                    // Open File Dialog to choose plugin
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("CLAP Plugin", &["clap"])
+                        .pick_file() 
+                    {
+                        if let Some(ref engine) = self.engine {
+                            if let Some(path_str) = path.to_str() {
+                                 eprintln!("[UI] Requesting Add Track: {}", path_str);
+                                 if let Err(e) = engine.add_track(Some(path_str)) {
+                                     eprintln!("Failed to add track: {}", e);
+                                 } else {
+                                     // Sync UI state
+                                     let name = path.file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("Plugin")
+                                        .to_string();
+
+                                     eprintln!("[UI] Track Added Successfully: {}", name);
+                                     self.tracks.push(TrackData { 
+                                         name, 
+                                         active_clip: None, 
+                                         ..Default::default() 
+                                     });
+                                 }
+                            } else {
+                                eprintln!("[UI] Error: Path is not valid UTF-8");
+                            }
+                        }
+                    } 
                 }
+                
+                ui.label(format!("Count: {}", self.tracks.len()));
             });
 
             ui.add_space(20.0);
@@ -276,7 +321,9 @@ impl eframe::App for OmniApp {
                         let _ = self.messenger.send(EngineCommand::SimulateCrash { track_index: 0 });
                     }
                 });
-                egui::ScrollArea::horizontal().show(ui, |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_source("device_view_scroll")
+                    .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         // Limit to first 16 params for UI safety in prototype
                         for param in self.plugin_params.iter().take(16) {
@@ -331,7 +378,9 @@ impl eframe::App for OmniApp {
             ui.add_space(5.0);
             
             // MATRIX GRID (Cols = Tracks, Rows = Clips)
-            egui::ScrollArea::horizontal().show(ui, |ui| {
+            egui::ScrollArea::horizontal()
+                .id_source("session_matrix_scroll")
+                .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // MASTER SCENE COLUMN
                     ui.vertical(|ui| {
@@ -339,7 +388,7 @@ impl eframe::App for OmniApp {
                         ui.add_space(5.0);
                         
                         for scene_idx in 0..8 {
-                            let btn_size = egui::vec2(60.0, 40.0);
+                            let btn_size = egui::vec2(60.0, 30.0); // Match Track Clip height (30.0)
                             let btn = egui::Button::new(format!("Scene {}", scene_idx + 1));
                             
                             // Scene Button
@@ -363,100 +412,24 @@ impl eframe::App for OmniApp {
 
                     // TRACK COLUMNS
                     for (track_idx, track) in self.tracks.iter_mut().enumerate() {
-                        ui.vertical(|ui| {
+                        ui.push_id(track_idx, |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(90.0); // Fixed width for Compact Layout (appx 4 buttons * 22px)
                             // Track Header
                             ui.label(egui::RichText::new(&track.name).strong());
                             
-                            // Load Plugin Button
-                            if ui.button("📂 Load").clicked() {
-                                if let Some(ref engine) = self.engine {
-                                    // Use rfd to open file dialog
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .add_filter("CLAP Plugin", &["clap"])
-                                        .pick_file() 
-                                    {
-                                        if let Some(path_str) = path.to_str() {
-                                             if let Err(e) = engine.load_plugin_to_track(track_idx, path_str) {
-                                                 eprintln!("Failed to load plugin: {}", e);
-                                             } else {
-                                                 // Update UI Name
-                                                 track.name = path.file_stem()
-                                                     .and_then(|s| s.to_str())
-                                                     .unwrap_or("Plugin")
-                                                     .to_string();
-                                                 
-                                                 // Update params (request from engine)
-                                                 // Note: This needs track index
-                                                 let (tx_res, rx_res) = unbounded();
-                                                 let _ = self.messenger.send(EngineCommand::GetPluginParams { track_index: track_idx, response_tx: tx_res });
-                                                 if let Ok(params) = rx_res.recv() {
-                                                     self.plugin_params = params;
-                                                     // Initialize param states
-                                                     self.param_states.clear();
-                                                     for p in &self.plugin_params {
-                                                         self.param_states.insert(p.id, p.default_value as f32);
-                                                     }
-                                                 }
-                                             }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Mute/Stop
-                            ui.horizontal(|ui| {
-                                let mute_color = if track.mute { egui::Color32::from_rgb(255, 50, 50) } else { egui::Color32::from_gray(60) };
-                                if ui.add_sized([30.0, 20.0], egui::Button::new("M").fill(mute_color)).clicked() {
-                                    track.mute = !track.mute;
-                                    let _ = self.messenger.send(EngineCommand::SetMute { track_index: track_idx, muted: track.mute });
-                                }
-                                
-                                // Stop Clip Button
-                                if ui.add_sized([30.0, 20.0], egui::Button::new("■")).clicked() {
-                                    track.active_clip = None;
-                                    let _ = self.messenger.send(EngineCommand::StopTrack { track_index: track_idx });
-                                }
-                            });
-                            
-                            // GUI Button
-                            if ui.add_sized([60.0, 18.0], egui::Button::new("Show GUI")).clicked() {
-                                let _ = self.messenger.send(EngineCommand::OpenPluginEditor { track_index: track_idx });
-                            }
-                            
-                            let flash = track.trigger_flash;
-                            let _flash_color = egui::Color32::from_rgb(
-                                (50.0 + flash * 200.0) as u8,
-                                (50.0 + flash * 200.0) as u8,
-                                (50.0 + flash * 200.0) as u8,
-                            );
-
-                            // Volume Slider
-                            ui.label("Vol");
-                            if ui.add_sized(egui::vec2(20.0, 60.0), egui::Slider::new(&mut track.volume, 0.0..=1.0).show_value(false).vertical()).changed() {
-                                let _ = self.messenger.send(EngineCommand::SetTrackVolume { track_index: track_idx, volume: track.volume });
-                            }
-                            
-                            // Pan Slider
-                            ui.label("Pan");
-                            if ui.add_sized(egui::vec2(20.0, 40.0), egui::Slider::new(&mut track.pan, -1.0..=1.0).show_value(false).vertical()).changed() {
-                                let _ = self.messenger.send(EngineCommand::SetTrackPan { track_index: track_idx, pan: track.pan });
-                            }
-
-                            ui.add_space(5.0);
-
-                            // Clips (Rows)
+                            // 1. Clips (Top of Strip) - Matches Master Scene buttons
                             for (clip_idx, clip) in track.clips.iter_mut().enumerate() {
                                 let is_active = track.active_clip == Some(clip_idx);
                                 let is_selected = self.selected_track == track_idx && self.selected_clip == clip_idx;
                                 
                                 let mut color = if is_active {
-                                    clip.color // Active color
+                                    clip.color
                                 } else {
-                                    egui::Color32::from_gray(40) // Empty/Inactive
+                                    egui::Color32::from_gray(40)
                                 };
                                 
                                 if is_selected {
-                                    // Highlight selected
                                     color = egui::Color32::from_rgb(
                                         color.r().saturating_add(50), 
                                         color.g().saturating_add(50), 
@@ -467,23 +440,104 @@ impl eframe::App for OmniApp {
                                 let icon = if is_active { "▶" } else { "⏵" };   
                                 let btn = egui::Button::new(icon)
                                     .fill(color)
-                                    .min_size(egui::vec2(40.0, 30.0));
+                                    .min_size(egui::vec2(ui.available_width(), 30.0));
                                 
                                 if ui.add(btn).clicked() {
-                                    // Select for editing
                                     self.selected_track = track_idx;
                                     self.selected_clip = clip_idx;
-                                    
-                                    // Trigger in Engine
-                                    track.active_clip = Some(clip_idx); // Optimistic UI
+                                    track.active_clip = Some(clip_idx);
                                     let _ = self.messenger.send(EngineCommand::TriggerClip { track_index: track_idx, clip_index: clip_idx });
                                 }
                             }
-                        });
+
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.add_space(5.0);
+
+                            // 2. Track Controls (Bottom of Strip)
+                            
+                            // 2. Track Mixer Strip (Compact)
+                            
+                            // A. Header Row: Load | GUI | Mute | Stop
+                            ui.horizontal(|ui| {
+                                let btn_w = (ui.available_width() - 12.0) / 4.0; // 4 buttons, 3 spaces approx
+                                let btn_size = egui::vec2(btn_w, 20.0);
+                                
+                                // Load
+                                if ui.add_sized(btn_size, egui::Button::new("📂")).clicked() {
+                                    if let Some(ref engine) = self.engine {
+                                        if let Some(path) = rfd::FileDialog::new().add_filter("CLAP", &["clap"]).pick_file() {
+                                            if let Some(path_str) = path.to_str() {
+                                                 let _ = engine.load_plugin_to_track(track_idx, path_str);
+                                                 track.name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Plugin").to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // GUI
+                                if ui.add_sized(btn_size, egui::Button::new("GUI")).clicked() {
+                                    let _ = self.messenger.send(EngineCommand::OpenPluginEditor { track_index: track_idx });
+                                }
+                                
+                                // Mute
+                                let mute_color = if track.mute { egui::Color32::RED } else { egui::Color32::from_gray(60) };
+                                if ui.add_sized(btn_size, egui::Button::new("M").fill(mute_color)).clicked() {
+                                    track.mute = !track.mute;
+                                    let _ = self.messenger.send(EngineCommand::SetMute { track_index: track_idx, muted: track.mute });
+                                }
+
+                                // Stop
+                                if ui.add_sized(btn_size, egui::Button::new("■")).clicked() {
+                                    track.active_clip = None;
+                                    let _ = self.messenger.send(EngineCommand::StopTrack { track_index: track_idx });
+                                }
+                            });
+
+                            ui.add_space(10.0);
+
+                            // B. Knobs Row: Volume | Pan
+                            ui.horizontal(|ui| {
+                                let col_w = (ui.available_width() - 4.0) / 2.0;
+                                
+                                // Vol Col
+                                ui.vertical(|ui| {
+                                    ui.set_width(col_w);
+                                    ui.label(egui::RichText::new("Vol").small().weak());
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((col_w - 30.0) / 2.0); // Center knob
+                                        if knob_ui(ui, &mut track.volume, 0.0..=1.0).changed() {
+                                            let _ = self.messenger.send(EngineCommand::SetTrackVolume { track_index: track_idx, volume: track.volume });
+                                        }
+                                    });
+                                    let db = if track.volume > 0.0 { 20.0 * track.volume.log10() } else { -144.0 };
+                                    ui.label(egui::RichText::new(format!("{:.1}dB", db)).small());
+                                });
+
+                                // Pan Col
+                                ui.vertical(|ui| {
+                                    ui.set_width(col_w);
+                                    ui.label(egui::RichText::new("Pan").small().weak());
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((col_w - 30.0) / 2.0); // Center knob
+                                        if knob_ui(ui, &mut track.pan, -1.0..=1.0).changed() {
+                                            let _ = self.messenger.send(EngineCommand::SetTrackPan { track_index: track_idx, pan: track.pan });
+                                        }
+                                    });
+                                    ui.label(egui::RichText::new(format!("{:.2}", track.pan)).small());
+                                });
+                            });
+
+                            ui.add_space(10.0);
+                        }); // Close ui.vertical
+                        }); // Close ui.push_id
+                        
+                        ui.add_space(4.0);
+                        ui.separator();
                         ui.add_space(4.0);
                     }
-                });
-            });
+                }); // Close ui.horizontal (Tracks Container)
+            }); // Close ScrollArea
 
             ui.add_space(20.0);
             ui.separator();
