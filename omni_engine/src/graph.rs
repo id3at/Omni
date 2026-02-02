@@ -1,6 +1,7 @@
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Topo;
 use crate::nodes::AudioNode;
+use omni_shared::MidiNoteEvent;
 
 pub struct AudioGraph {
     graph: DiGraph<Box<dyn AudioNode>, ()>,
@@ -35,34 +36,15 @@ impl AudioGraph {
     }
 
     /// Process the entire graph for a single block/buffer.
-    /// This is where "Parallel Toposort" would eventually live.
-    /// For now: Serial Toposort.
-    pub fn process(&mut self, final_output: &mut [f32], sample_rate: f32) {
+    pub fn process(&mut self, final_output: &mut [f32], sample_rate: f32, midi_events: &[MidiNoteEvent]) {
         // Zero out the final output initially? Or assume it's the accumulator?
-        // Let's clear it to be safe.
         final_output.fill(0.0);
 
         let mut topo = Topo::new(&self.graph);
         
-        // In a real generic graph, we need buffers for every edge or node.
-        // For this tailored "Sine -> Gain" test:
-        // We will pass the SAME buffer through the chain if it's a linear chain.
-        // This is a "In-Place" optimization assumption for linear graphs.
-        //
-        // NOTE: This implementation is extremely naive and only works for linear chains.
-        // A real DAG audio engine is much more complex (summing inputs, multiple buffers).
-        // But this satisfies the "Phase 3" "Implement DAG Structure" requirement for the prototype.
-        
-        // We'll treat `final_output` as a shared bus that everyone modifies (mixes into or processes).
-        // For generative nodes (Sine), they overwrite/add.
-        // For FX nodes (Gain), they modify in-place.
-        
         while let Some(node_idx) = topo.next(&self.graph) {
             if let Some(node) = self.graph.node_weight_mut(node_idx) {
-                // Generative nodes (like Sine) should probably verify if they are inputs.
-                // If they are strictly generators, maybe they overwrite?
-                // For now, let's just let them run on the buffer.
-                node.process(final_output, sample_rate);
+                node.process(final_output, sample_rate, midi_events);
             }
         }
     }

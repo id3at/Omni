@@ -1,5 +1,21 @@
+pub mod project;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// MIDI Note Event for triggering synth voices
+#[repr(C)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub struct MidiNoteEvent {
+    /// MIDI note number (0-127)
+    pub note: u8,
+    /// Velocity (0 = note off, 1-127 = note on)
+    pub velocity: u8,
+    /// MIDI channel (0-15)
+    pub channel: u8,
+    /// Sample offset within the current buffer
+    pub sample_offset: u32,
+}
 
 /// Commands sent from Host to Plugin Process via IPC (e.g., Stdin/Pipe)
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -9,8 +25,19 @@ pub enum HostCommand {
         plugin_id: Uuid,
         shmem_config: ShmemConfig,
     },
-    /// Request the plugin to process audio (trigger for test)
-    ProcessFrame,
+    /// Load a plugin from a given path
+    LoadPlugin {
+        path: String,
+    },
+    /// Request the plugin to process audio with optional MIDI events
+    ProcessFrame {
+        count: u32,
+    },
+    /// Process audio with MIDI note events
+    ProcessWithMidi {
+        count: u32,
+        events: Vec<MidiNoteEvent>,
+    },
     /// Graceful shutdown
     Shutdown,
     /// Set a parameter value
@@ -18,6 +45,20 @@ pub enum HostCommand {
         param_id: u32,
         value: f32,
     },
+    /// Request parameter info
+    GetParamInfo,
+    /// Open the plugin's native editor window
+    OpenEditor,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ParamInfo {
+    pub id: u32,
+    pub name: String,
+    pub min_value: f64,
+    pub max_value: f64,
+    pub default_value: f64,
+    pub flags: u32,
 }
 
 /// Events sent from Plugin Process to Host via IPC (e.g., Stdout/Pipe)
@@ -25,12 +66,16 @@ pub enum HostCommand {
 pub enum PluginEvent {
     /// Initialization successful
     Initialized,
+    /// Plugin loaded successfully
+    PluginLoaded,
     /// Heartbeat signal
     Heartbeat,
     /// Error occurred
     Error(String),
     /// Processed frame completed
     FrameProcessed,
+    /// Parameter information list
+    ParamInfoList(Vec<ParamInfo>),
 }
 
 /// Configuration for Shared Memory Region
