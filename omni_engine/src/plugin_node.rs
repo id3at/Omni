@@ -79,7 +79,7 @@ impl PluginNode {
         // Wait for PluginLoaded
         let mut line = String::new();
         reader.read_line(&mut line)?;
-        let decoded = BASE64.decode(line.trim())?;
+        let _decoded = BASE64.decode(line.trim())?;
         Ok(Self {
             process: child,
             shmem,
@@ -160,36 +160,66 @@ impl AudioNode for PluginNode {
 
         let count = output.len() as u32;
 
-        // 1. Copy Audio to Shmem
         unsafe {
-            let data_ptr = self.shmem.as_ptr().add(std::mem::size_of::<OmniShmemHeader>()) as *mut f32;
+            let ptr = self.shmem.as_ptr();
+            let header = &mut *(ptr as *mut OmniShmemHeader);
+            let data_ptr = ptr.add(std::mem::size_of::<OmniShmemHeader>()) as *mut f32;
+
+            // 1. Copy Audio to Shmem
             std::ptr::copy_nonoverlapping(output.as_ptr(), data_ptr, output.len());
-        }
-
-        // 2. Send Process Command
-        if let Some(stdin) = &mut self.stdin {
-            let cmd = if midi_events.is_empty() {
-                HostCommand::ProcessFrame { count }
-            } else {
-                HostCommand::ProcessWithMidi { count, events: midi_events.to_vec() }
-            };
-
-            if let Ok(serialized) = bincode::serialize(&cmd) {
-                 let _ = writeln!(stdin, "{}", BASE64.encode(serialized));
-                 let _ = stdin.flush();
+            
+            // 2. Set Parameters and write MIDI
+            header.sample_count = count;
+            
+            // Serialize MIDI
+            let audio_size_bytes = count as usize * std::mem::size_of::<f32>();
+            // Note: data_ptr is f32 ptr.
+            // MIDI buffer starts after audio.
+            // But strict offset calculation:
+            // header.midi_offset = sizeof(Header) + audio_size_bytes?
+            // Let's settle on a fixed offset logic for now or write it to header.
+            
+            let midi_offset_bytes = std::mem::size_of::<OmniShmemHeader>() + audio_size_bytes;
+            // Pad to 4 bytes alignment if needed (f32 is 4 bytes, so likely aligned if header is aligned)
+            
+            header.midi_offset = midi_offset_bytes as u32;
+            
+            let midi_ptr = (ptr as *mut u8).add(midi_offset_bytes) as *mut omni_shared::MidiNoteEvent;
+            
+            let events_to_write = midi_events.len().min(omni_shared::MAX_MIDI_EVENTS);
+             if events_to_write > 0 {
+                std::ptr::copy_nonoverlapping(midi_events.as_ptr(), midi_ptr, events_to_write);
             }
-        }
-
-        // 3. Wait for Reply (Blocking)
-        if let Some(reader) = &mut self.reader {
-            let mut line = String::new();
-            let _ = reader.read_line(&mut line);
-        }
-
-        // 4. Read Audio back from Shmem
-        unsafe {
-            let data_ptr = self.shmem.as_ptr().add(std::mem::size_of::<OmniShmemHeader>()) as *const f32;
+            header.midi_event_count = events_to_write as u32;
+            
+            // 3. Signal Process
+            // std::sync::atomic::fence(Ordering::Release); // Ensure data is visible?
+            std::ptr::write_volatile(&mut header.command, omni_shared::CMD_PROCESS);
+            
+            // 4. Spin Wait
+            let mut spin_count = 0;
+            const TIMEOUT_SPINS: usize = 200000; // ~ 10ms at 2GHz?
+            
+            while std::ptr::read_volatile(&header.response) != omni_shared::RSP_DONE {
+                spin_count += 1;
+                if spin_count < 2000 {
+                    std::hint::spin_loop();
+                } else {
+                    std::thread::yield_now();
+                }
+                if spin_count > TIMEOUT_SPINS {
+                    // Timeout (Plugin hung or crashed)
+                    // eprintln!("[PluginNode] Timeout waiting for plugin!");
+                    // Detect potential crash
+                    return;
+                }
+            }
+            
+            // 5. Read Audio back
             std::ptr::copy_nonoverlapping(data_ptr, output.as_mut_ptr(), output.len());
+            
+            // 6. Reset Handshake
+            std::ptr::write_volatile(&mut header.command, omni_shared::CMD_IDLE);
         }
     }
 

@@ -101,10 +101,27 @@ pub struct OmniShmemHeader {
     pub output_offset: u32,
     /// Offset to the Parameter Bank
     pub param_offset: u32,
+    
+    // Atomic Command/Response Protocol
+    pub command: u32, // Host -> Plugin (0=Idle, 1=Process)
+    pub response: u32, // Plugin -> Host (0=Idle, 1=Done)
+    pub sample_count: u32,
+    pub midi_event_count: u32,
+    /// Offset to the MIDI Event Buffer
+    pub midi_offset: u32,
 }
+
+pub const SPIN_TIMEOUT_MS: u64 = 5; // Timeout for spin loop
+
+pub const CMD_IDLE: u32 = 0;
+pub const CMD_PROCESS: u32 = 1;
+
+pub const RSP_IDLE: u32 = 0;
+pub const RSP_DONE: u32 = 1;
 
 pub const OMNI_MAGIC: u32 = 0x01131109;
 
 // Helper to calculate buffer sizes for fixed latency
 pub const BUFFER_SIZE: usize = 512;
 pub const CHANNEL_COUNT: usize = 2;
+pub const MAX_MIDI_EVENTS: usize = 128;

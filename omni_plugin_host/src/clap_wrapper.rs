@@ -15,7 +15,7 @@ use clap_sys::ext::params::{clap_plugin_params, CLAP_EXT_PARAMS, clap_param_info
 use clap_sys::ext::gui::{clap_plugin_gui, CLAP_EXT_GUI, clap_window, CLAP_WINDOW_API_X11};
 use clap_sys::ext::timer_support::{clap_plugin_timer_support, clap_host_timer_support, CLAP_EXT_TIMER_SUPPORT};
 use winit::window::Window;
-use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use libloading::os::unix::Library as UnixLibrary;
 use libloading::{Library, Symbol};
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::os::raw::c_char;
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use lazy_static::lazy_static; // Need lazy_static or OnceLock. Actually simple Mutex works if global.
+// use lazy_static::lazy_static; // Need lazy_static or OnceLock. Actually simple Mutex works if global.
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -405,11 +405,11 @@ impl ClapPlugin {
         }
 
         // Get Native Handle
-        // raw_window_handle() returns Result<RawWindowHandle, HandleError> in 0.6
-        let raw_handle = window.raw_window_handle();
+        // Get Native Handle
+        let raw_handle = window.window_handle()?.as_raw();
         let window_ptr = match raw_handle {
-             Ok(RawWindowHandle::Xlib(handle)) => handle.window as *mut c_void,
-             Ok(RawWindowHandle::Xcb(handle)) => handle.window.get() as *mut c_void,
+             RawWindowHandle::Xlib(handle) => handle.window as *mut c_void,
+             RawWindowHandle::Xcb(handle) => handle.window.get() as *mut c_void,
              _ => return Err(anyhow!("Unsupported window handle type (Not X11 or failed to get handle)")),
         };
 

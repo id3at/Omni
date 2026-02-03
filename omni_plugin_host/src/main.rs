@@ -1,14 +1,14 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bincode;
 use omni_shared::{HostCommand, PluginEvent, OmniShmemHeader, OMNI_MAGIC};
 use shared_memory::{ShmemConf, Shmem};
-use uuid::Uuid; // Added Uuid
+use uuid::Uuid;
 use std::io::{self, BufRead, Write};
 use base64::prelude::BASE64_STANDARD as BASE64;
 use base64::Engine;
 
-mod vst3_defs;
-mod vst3_wrapper;
+// mod vst3_defs;
+// mod vst3_wrapper;
 // mod clap_defs;
 mod clap_wrapper;
 
@@ -17,17 +17,14 @@ mod clap_wrapper;
 
 use clap_wrapper::ClapPlugin;
 
-use winit::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use winit::event::{Event, WindowEvent};
 use winit::window::WindowBuilder;
-use winit::platform::x11::EventLoopBuilderExtX11;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle, HasRawWindowHandle}; // Added HasRawWindowHandle
+use winit::event_loop::EventLoopBuilder;
 
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::collections::HashMap;
-use std::fs::OpenOptions; // Added
-use std::panic; // Added
+use std::fs::OpenOptions;
+use std::panic;
 
 #[derive(Debug)]
 enum CustomEvent {
@@ -49,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .append(true)
         .open("/tmp/host_debug.log")?;
     
-    let mut log_file = std::sync::Arc::new(std::sync::Mutex::new(file));
+    let log_file = std::sync::Arc::new(std::sync::Mutex::new(file));
     let log_clone = log_file.clone();
 
     // Panic Hook
@@ -212,6 +209,102 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Spawn Audio Thread (High Priority Poll)
+    let plugin_for_audio = plugin.clone();
+    let shmem_for_audio = shmem.clone();
+    
+    thread::Builder::new()
+        .name("AudioThread".into())
+        .spawn(move || {
+            // Wait for Shmem to be available
+            let mut shmem_ptr: Option<*mut u8> = None;
+            
+            loop {
+                // 1. Acquire Shmem Pointer (Lazy Init)
+                if shmem_ptr.is_none() {
+                    if let Ok(guard) = shmem_for_audio.lock() {
+                        if let Some(ref s) = *guard {
+                            shmem_ptr = Some(s.0.as_ptr());
+                        }
+                    }
+                    if shmem_ptr.is_none() {
+                        thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    eprintln!("[AudioThread] Shmem attached. Starting poll loop.");
+                }
+
+                let base_ptr = shmem_ptr.unwrap();
+                let header = unsafe { &mut *(base_ptr as *mut OmniShmemHeader) };
+                
+                // 2. Poll Command
+                // We use relaxed load first to check
+                let cmd = unsafe { std::ptr::read_volatile(&header.command) };
+                
+                if cmd == omni_shared::CMD_PROCESS {
+                    // Process Audio!
+                    let count = header.sample_count;
+                    let midi_count = header.midi_event_count;
+                    let midi_offset = header.midi_offset;
+
+                    unsafe {
+                        let data_ptr = base_ptr.add(std::mem::size_of::<OmniShmemHeader>()) as *mut f32;
+                        let slice = std::slice::from_raw_parts_mut(data_ptr, count as usize);
+                        
+                        let midi_slice = if midi_count > 0 {
+                            let midi_ptr = base_ptr.add(midi_offset as usize) as *const omni_shared::MidiNoteEvent;
+                            std::slice::from_raw_parts(midi_ptr, midi_count as usize)
+                        } else {
+                            &[]
+                        };
+                        
+                        let guard = plugin_for_audio.lock().unwrap();
+                        if let Some(ref p) = *guard {
+                            p.process_audio(slice, 44100.0, midi_slice);
+                        } else {
+                            // Passthrough/Silence
+                             for s in slice.iter_mut() { *s = 0.0; }
+                        }
+                        
+                        // 3. Mark Done
+                         std::ptr::write_volatile(&mut header.response, omni_shared::RSP_DONE);
+                    }
+                    
+                    // Wait for Host to ack (Optional, or Host just sets command=IDLE)
+                    // The protocol we decided:
+                    // PluginNode sets CMD_PROCESS.
+                    // Host sets RSP_DONE.
+                    // PluginNode sees DONE, reads, sets CDM_IDLE.
+                    // Host sees IDLE, sets RSP_IDLE.
+                    
+                    // So we wait for CMD to become IDLE
+                     let mut spin_count = 0;
+                     while unsafe { std::ptr::read_volatile(&header.command) } != omni_shared::CMD_IDLE {
+                         std::hint::spin_loop();
+                         spin_count += 1;
+                         if spin_count > 100000 {
+                             // Timeout? break
+                             break;
+                         }
+                     }
+                     unsafe { std::ptr::write_volatile(&mut header.response, omni_shared::RSP_IDLE); }
+
+                } else {
+                    // IDLE State: Spin briefly then sleep
+                    // This hybrid approach reduces latency for the incoming command
+                    let mut i = 0;
+                    while unsafe { std::ptr::read_volatile(&header.command) } != omni_shared::CMD_PROCESS && i < 1000 {
+                         std::hint::spin_loop();
+                         i += 1;
+                    }
+                    
+                    if unsafe { std::ptr::read_volatile(&header.command) } != omni_shared::CMD_PROCESS {
+                         thread::sleep(std::time::Duration::from_micros(50));
+                    }
+                }
+            }
+        })?;
+
     // GUI Logic (Main Thread)
     // We keep track of open windows if needed (for now just one)
     let mut _window: Option<winit::window::Window> = None;
@@ -277,8 +370,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::UserEvent(CustomEvent::OpenEditor) => {
                  let mut f = log_file.lock().unwrap();
-                 // ... rest of OpenEditor code stays same, just re-indented potentially ...
                  let _ = writeln!(f, "[GUI] OpenEditor received.");
+
+                 // Check if window already open
+                 if _window.is_some() {
+                     let _ = writeln!(f, "[GUI] Window already open, focusing...");
+                      if let Some(win) = _window.as_ref() {
+                          win.focus_window();
+                      }
+                     return;
+                 }
 
                  // Create Window
                  match WindowBuilder::new()
@@ -287,7 +388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      .build(target) 
                  {
                      Ok(win) => {
-                         let raw_window_handle = win.raw_window_handle();
+
                          
                          // Attach Plugin
                          let guard = plugin.lock().unwrap();
@@ -309,11 +410,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                println!("[Event] Window CloseRequested received!");
+                eprintln!("[Event] Window CloseRequested received!");
                 // Cleanup Plugin GUI
                 let guard = plugin.lock().unwrap();
                 if let Some(ref p) = *guard {
-                    println!("[GUI] Destroying editor...");
+                    eprintln!("[GUI] Destroying editor...");
                     unsafe {
                         p.destroy_editor();
                     }
@@ -321,7 +422,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 _window = None; // Drop window closes it
             }
-            Event::WindowEvent { event, .. } => {
+            Event::WindowEvent { event: _event, .. } => {
                // println!("[Event] Other WindowEvent: {:?}", event); // Too noisy usually, but okay for now if commented out
             }
             _ => {}

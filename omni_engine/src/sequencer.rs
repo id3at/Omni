@@ -1,4 +1,4 @@
-use omni_shared::MidiNoteEvent;
+// use omni_shared::MidiNoteEvent;
 
 #[derive(Clone)]
 pub struct Sequencer {

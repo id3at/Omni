@@ -1,9 +1,8 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use omni_engine::{AudioEngine, EngineCommand};
 use crossbeam_channel::{unbounded, Sender, Receiver};
 use eframe::egui;
-use omni_shared::project::{Project, Track as SharedTrack, Clip as SharedClip};
-use std::collections::HashMap;
+use omni_shared::project::{Project};
 
 #[derive(Clone)]
 pub struct ClipData {
@@ -88,7 +87,7 @@ pub struct OmniApp {
     is_playing: bool,
     master_volume: f32,
     messenger: Sender<EngineCommand>,
-    receiver: Option<Receiver<EngineCommand>>,
+    _receiver: Option<Receiver<EngineCommand>>,
     engine: Option<AudioEngine>,
     tracks: Vec<TrackData>,
     bpm: f32,
@@ -125,7 +124,7 @@ impl OmniApp {
             is_playing: false,
             master_volume: 0.1,
             messenger: tx,
-            receiver: None, // Taken by engine
+            _receiver: None, // Taken by engine
             engine,
             tracks,
             bpm: 120.0,
@@ -141,7 +140,7 @@ impl OmniApp {
     fn load_project(&mut self, path: String) {
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(shared_proj) = serde_json::from_str::<Project>(&content) {
-                if let Some(ref engine) = self.engine {
+                if let Some(ref _engine) = self.engine {
                      // 1. Reset Engine Graph
                      let _ = self.messenger.send(EngineCommand::ResetGraph);
                      
@@ -172,8 +171,8 @@ impl OmniApp {
                          self.tracks.push(local_track);
 
                          // B. Engine Sync (Graph)
-                         let plugin_path = if shared_track.plugin_path.is_empty() { None } else { Some(shared_track.plugin_path.as_str()) };
-                         let _ = engine.add_track(plugin_path);
+                         let plugin_path = if shared_track.plugin_path.is_empty() { None } else { Some(shared_track.plugin_path.clone()) };
+                         let _ = self.messenger.send(EngineCommand::AddTrack { plugin_path });
                          
                          // C. Restore Parameters
                          for (&p_id, &val) in &shared_track.parameters {
@@ -281,28 +280,24 @@ impl eframe::App for OmniApp {
                         .add_filter("CLAP Plugin", &["clap"])
                         .pick_file() 
                     {
-                        if let Some(ref engine) = self.engine {
-                            if let Some(path_str) = path.to_str() {
-                                 eprintln!("[UI] Requesting Add Track: {}", path_str);
-                                 if let Err(e) = engine.add_track(Some(path_str)) {
-                                     eprintln!("Failed to add track: {}", e);
-                                 } else {
-                                     // Sync UI state
-                                     let name = path.file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("Plugin")
-                                        .to_string();
+                        if let Some(path_str) = path.to_str() {
+                             eprintln!("[UI] Requesting Add Track: {}", path_str);
+                             let _ = self.messenger.send(EngineCommand::AddTrack { plugin_path: Some(path_str.to_string()) });
+                             
+                             // Sync UI state
+                             let name = path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Plugin")
+                                .to_string();
 
-                                     eprintln!("[UI] Track Added Successfully: {}", name);
-                                     self.tracks.push(TrackData { 
-                                         name, 
-                                         active_clip: None, 
-                                         ..Default::default() 
-                                     });
-                                 }
-                            } else {
-                                eprintln!("[UI] Error: Path is not valid UTF-8");
-                            }
+                             eprintln!("[UI] Track Added Successfully: {}", name);
+                             self.tracks.push(TrackData { 
+                                 name, 
+                                 active_clip: None, 
+                                 ..Default::default() 
+                             });
+                        } else {
+                            eprintln!("[UI] Error: Path is not valid UTF-8");
                         }
                     } 
                 }
@@ -322,7 +317,7 @@ impl eframe::App for OmniApp {
                     }
                 });
                 egui::ScrollArea::horizontal()
-                    .id_source("device_view_scroll")
+                    .id_salt("device_view_scroll")
                     .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         // Limit to first 16 params for UI safety in prototype
@@ -379,7 +374,7 @@ impl eframe::App for OmniApp {
             
             // MATRIX GRID (Cols = Tracks, Rows = Clips)
             egui::ScrollArea::horizontal()
-                .id_source("session_matrix_scroll")
+                .id_salt("session_matrix_scroll")
                 .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // MASTER SCENE COLUMN
@@ -465,12 +460,10 @@ impl eframe::App for OmniApp {
                                 
                                 // Load
                                 if ui.add_sized(btn_size, egui::Button::new("📂")).clicked() {
-                                    if let Some(ref engine) = self.engine {
-                                        if let Some(path) = rfd::FileDialog::new().add_filter("CLAP", &["clap"]).pick_file() {
-                                            if let Some(path_str) = path.to_str() {
-                                                 let _ = engine.load_plugin_to_track(track_idx, path_str);
-                                                 track.name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Plugin").to_string();
-                                            }
+                                    if let Some(path) = rfd::FileDialog::new().add_filter("CLAP", &["clap"]).pick_file() {
+                                        if let Some(path_str) = path.to_str() {
+                                             let _ = self.messenger.send(EngineCommand::LoadPluginToTrack { track_index: track_idx, plugin_path: path_str.to_string() });
+                                             track.name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Plugin").to_string();
                                         }
                                     }
                                 }
