@@ -21,7 +21,7 @@ use winit::event::{Event, WindowEvent};
 use winit::window::WindowBuilder;
 use winit::event_loop::EventLoopBuilder;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::fs::OpenOptions;
 use std::panic;
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Shared State
     let shmem: Arc<Mutex<Option<SafeShmem>>> = Arc::new(Mutex::new(None));
-    let plugin: Arc<Mutex<Option<ClapPlugin>>> = Arc::new(Mutex::new(None));
+    let plugin: Arc<RwLock<Option<ClapPlugin>>> = Arc::new(RwLock::new(None));
     
     // Event Loop
     // Use X11 backend explicitly if needed, or default
@@ -138,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let data_ptr = shmem_mapping.as_ptr().add(std::mem::size_of::<OmniShmemHeader>()) as *mut f32;
                                 let slice = std::slice::from_raw_parts_mut(data_ptr, count as usize);
                                 
-                                let guard = plugin_for_ipc.lock().unwrap();
+                                let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
                                     p.process_audio(slice, 44100.0, &[]);
                                 } else {
@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let data_ptr = shmem_mapping.as_ptr().add(std::mem::size_of::<OmniShmemHeader>()) as *mut f32;
                                 let slice = std::slice::from_raw_parts_mut(data_ptr, count as usize);
                                 
-                                let guard = plugin_for_ipc.lock().unwrap();
+                                let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
                                     p.process_audio(slice, 44100.0, &events);
                                 }
@@ -171,13 +171,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      }
                 }
                 HostCommand::SetParameter { param_id, value } => {
-                     let guard = plugin_for_ipc.lock().unwrap();
+                     let guard = plugin_for_ipc.read().unwrap();
                      if let Some(ref p) = *guard {
                          p.set_parameter(param_id, value as f64);
                      }
                 }
                 HostCommand::GetParamInfo => {
-                     let guard = plugin_for_ipc.lock().unwrap();
+                     let guard = plugin_for_ipc.read().unwrap();
                      let mut params = Vec::new();
                      if let Some(ref p) = *guard {
                          unsafe {
@@ -258,7 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &[]
                         };
                         
-                        let guard = plugin_for_audio.lock().unwrap();
+                        let guard = plugin_for_audio.read().unwrap();
                         if let Some(ref p) = *guard {
                             p.process_audio(slice, 44100.0, midi_slice);
                         } else {
@@ -317,7 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match event {
             Event::AboutToWait => {
                  // Check Timers
-                let guard = plugin.lock().unwrap();
+                let guard = plugin.read().unwrap();
                 if let Some(ref p) = *guard {
                     unsafe { p.check_timers(); }
                 }
@@ -347,7 +347,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  let _ = writeln!(f, "[Main] Processing LoadPlugin: {}", path);
                  match unsafe { ClapPlugin::load(&path) } {
                     Ok(p) => {
-                        let mut guard = plugin.lock().unwrap();
+                        let mut guard = plugin.write().unwrap();
                         *guard = Some(p);
                         
                         // Send Reply
@@ -391,7 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                          
                          // Attach Plugin
-                         let guard = plugin.lock().unwrap();
+                         let guard = plugin.read().unwrap();
                          if let Some(ref p) = *guard {
                              unsafe {
                                  // We need to implement attach_gui on ClapPlugin
@@ -412,7 +412,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 eprintln!("[Event] Window CloseRequested received!");
                 // Cleanup Plugin GUI
-                let guard = plugin.lock().unwrap();
+                let guard = plugin.read().unwrap();
                 if let Some(ref p) = *guard {
                     eprintln!("[GUI] Destroying editor...");
                     unsafe {

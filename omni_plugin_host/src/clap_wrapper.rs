@@ -39,6 +39,13 @@ lazy_static::lazy_static! {
 
 use omni_shared::MidiNoteEvent;
 
+struct AudioBuffers {
+    left: Vec<f32>,
+    right: Vec<f32>,
+    input_events: Vec<clap_event_note>,
+    param_events: Vec<clap_event_param_value>,
+}
+
 pub struct ClapPlugin {
     _library: Arc<Library>,
     pub plugin: *const clap_plugin,
@@ -46,6 +53,10 @@ pub struct ClapPlugin {
     _host_box: Box<clap_host>, 
     pub params: *const clap_plugin_params,
     pending_params: Arc<Mutex<Vec<(u32, f64)>>>,
+
+    // Interior Mutability for Audio Thread exclusive access
+    // This Mutex is ONLY locked by process_audio, so it is uncontended by GUI
+    audio_buffers: Mutex<AudioBuffers>,
 }
 
 unsafe impl Send for ClapPlugin {}
@@ -95,27 +106,33 @@ extern "C" fn host_get_extension(_host: *const clap_host, extension_id: *const c
 }
 
 // Event list context for input events
+// Event list context for input events
 struct EventListContext {
-    events: Vec<clap_event_note>,
-    param_events: Vec<clap_event_param_value>,
+    events: *const Vec<clap_event_note>,
+    param_events: *const Vec<clap_event_param_value>,
 }
 
 // Input events callback: get size
 unsafe extern "C" fn input_events_size(list: *const clap_input_events) -> u32 {
     let ctx = (*list).ctx as *const EventListContext;
-    ((*ctx).events.len() + (*ctx).param_events.len()) as u32
+    let events = &*(*ctx).events;
+    let param_events = &*(*ctx).param_events;
+    (events.len() + param_events.len()) as u32
 }
 
 // Input events callback: get event
 unsafe extern "C" fn input_events_get(list: *const clap_input_events, index: u32) -> *const clap_event_header {
     let ctx = (*list).ctx as *const EventListContext;
-    let note_count = (*ctx).events.len();
+    let events = &*(*ctx).events;
+    let param_events = &*(*ctx).param_events;
+    
+    let note_count = events.len();
     if (index as usize) < note_count {
-        &(&(*ctx).events)[index as usize].header as *const clap_event_header
+        &events[index as usize].header as *const clap_event_header
     } else {
         let param_idx = (index as usize) - note_count;
-        if param_idx < (*ctx).param_events.len() {
-            &(&(*ctx).param_events)[param_idx].header as *const clap_event_header
+        if param_idx < param_events.len() {
+            &param_events[param_idx].header as *const clap_event_header
         } else {
             ptr::null()
         }
@@ -235,27 +252,49 @@ impl ClapPlugin {
              }
         }
 
+        // Pre-allocate buffers (Max buffer size 4096 to be safe)
+        let max_buf = 4096;
+
         Ok(Self {
             _library: library,
             plugin,
             _host_box: host,
             params,
             pending_params: Arc::new(Mutex::new(Vec::new())),
+            audio_buffers: Mutex::new(AudioBuffers {
+                left: vec![0.0; max_buf],
+                right: vec![0.0; max_buf],
+                input_events: Vec::with_capacity(128),
+                param_events: Vec::with_capacity(32),
+            }),
         })
     }
 
     /// Process audio with optional MIDI note events
+    /// Process audio - Zero Allocation Path
     pub unsafe fn process_audio(
         &self, 
         output_buffer: &mut [f32], 
         _sample_rate: f32,
         midi_events: &[MidiNoteEvent]
     ) {
+        // Acquire internal buffer lock (Fast, Uncontended)
+        let mut bufs = self.audio_buffers.lock().unwrap();
+        let AudioBuffers { left, right, input_events: clap_input_events, param_events: clap_param_events } = &mut *bufs;
+        
         let frames = output_buffer.len() / 2;
         
-        let clap_events: Vec<clap_event_note> = midi_events.iter().map(|ev| {
-            let event_type = if ev.velocity == 0 { CLAP_EVENT_NOTE_OFF } else { CLAP_EVENT_NOTE_ON };
-            clap_event_note {
+        // 1. Prepare Audio Buffers (Resize if needed, but usually reused)
+        if left.len() < frames {
+            left.resize(frames, 0.0);
+            right.resize(frames, 0.0);
+        }
+        
+        // 2. Prepare Events
+        clap_input_events.clear();
+        for ev in midi_events {
+             let event_type = if ev.velocity == 0 { CLAP_EVENT_NOTE_OFF } else { CLAP_EVENT_NOTE_ON };
+             clap_input_events.push(clap_event_note {
                 header: clap_event_header {
                     size: std::mem::size_of::<clap_event_note>() as u32,
                     time: ev.sample_offset,
@@ -268,55 +307,61 @@ impl ClapPlugin {
                 channel: ev.channel as i16,
                 key: ev.note as i16,
                 velocity: (ev.velocity as f64 / 127.0),
-            }
-        }).collect();
-
-        let mut clap_params = Vec::new();
+            });
+        }
+        
+        clap_param_events.clear();
         if let Ok(mut pending) = self.pending_params.lock() {
-            let pending_list: Vec<(u32, f64)> = pending.drain(..).collect();
-            for (id, val) in pending_list {
-                clap_params.push(clap_event_param_value {
-                    header: clap_event_header {
-                        size: std::mem::size_of::<clap_event_param_value>() as u32,
-                        time: 0, // Instant
-                        space_id: CLAP_CORE_EVENT_SPACE_ID,
-                        type_: CLAP_EVENT_PARAM_VALUE,
-                        flags: 0,
-                    },
-                    param_id: id,
-                    cookie: ptr::null_mut(),
-                    note_id: -1,
-                    port_index: 0,
-                    channel: -1,
-                    key: -1,
-                    value: val,
-                });
+            if !pending.is_empty() {
+                for (id, val) in pending.drain(..) {
+                    clap_param_events.push(clap_event_param_value {
+                        header: clap_event_header {
+                            size: std::mem::size_of::<clap_event_param_value>() as u32,
+                            time: 0,
+                            space_id: CLAP_CORE_EVENT_SPACE_ID,
+                            type_: CLAP_EVENT_PARAM_VALUE,
+                            flags: 0,
+                        },
+                        param_id: id,
+                        cookie: ptr::null_mut(),
+                        note_id: -1,
+                        port_index: 0,
+                        channel: -1,
+                        key: -1,
+                        value: val,
+                    });
+                }
             }
         }
 
-        let input_ctx = EventListContext { events: clap_events, param_events: clap_params };
+        // 3. Setup Process Context
+        let input_ctx = EventListContext { 
+            events: clap_input_events, 
+            param_events: clap_param_events 
+        };
+        
         let input_events = clap_input_events {
             ctx: &input_ctx as *const _ as *mut c_void,
             size: Some(input_events_size),
             get: Some(input_events_get),
         };
-
-        let output_ctx = EventListContext { events: Vec::new(), param_events: Vec::new() };
+        
+        let output_ctx = EventListContext { 
+             events: clap_input_events, // Dummy reuse 
+             param_events: clap_param_events 
+        };
         let output_events = clap_output_events {
             ctx: &output_ctx as *const _ as *mut c_void,
             try_push: Some(output_events_try_push),
         };
 
-        // Create temporary planar buffers
-        let mut left_buf = vec![0.0; frames];
-        let mut right_buf = vec![0.0; frames];
-
+        // 4. Setup Audio Buffer Pointers
         let mut output_channel_pointers = [
-            left_buf.as_mut_ptr(),
-            right_buf.as_mut_ptr()
+            left.as_mut_ptr(),
+            right.as_mut_ptr()
         ];
-
-        let mut output_buffers = clap_audio_buffer {
+        
+        let mut audio_outputs = clap_audio_buffer {
             data32: output_channel_pointers.as_mut_ptr(),
             data64: ptr::null_mut(),
             channel_count: 2,
@@ -324,29 +369,30 @@ impl ClapPlugin {
             constant_mask: 0,
         };
 
-        // Create process structure
         let process = clap_process {
-            steady_time: -1, // Unknown
+            steady_time: -1, 
             frames_count: frames as u32,
-            transport: ptr::null(), // No transport info for now
-            audio_inputs: ptr::null(), // Synth - no inputs
-            audio_outputs: &mut output_buffers,
+            transport: ptr::null(),
+            audio_inputs: ptr::null(), 
+            audio_outputs: &mut audio_outputs,
             audio_inputs_count: 0,
             audio_outputs_count: 1,
             in_events: &input_events,
             out_events: &output_events,
         };
 
-
-        // Call plugin process
+        // 5. Call Plugin
+        // Use self.plugin directly (it's safe if CLAP is thread safe)
         if let Some(process_fn) = (*self.plugin).process {
             process_fn(self.plugin, &process);
         }
 
-        // Interleave back to output_buffer (LRLR...)
+        // 6. Interleave Output
         for i in 0..frames {
-            output_buffer[i * 2] = left_buf[i];
-            output_buffer[i * 2 + 1] = right_buf[i];
+            let l = left.get_unchecked(i); // Unsafe known bound
+            let r = right.get_unchecked(i);
+            output_buffer[i * 2] = *l;
+            output_buffer[i * 2 + 1] = *r;
         }
     }
 
