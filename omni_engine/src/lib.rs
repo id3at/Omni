@@ -48,6 +48,7 @@ pub enum EngineCommand {
     ResetGraph,
     StopTrack { track_index: usize },
     OpenPluginEditor { track_index: usize },
+    SetClipLength { track_index: usize, clip_index: usize, length: f64 },
     AddTrack { plugin_path: Option<String> }, // Added AddTrack command
     LoadPluginToTrack { track_index: usize, plugin_path: String }, // Added LoadPlugin command
 }
@@ -133,6 +134,15 @@ impl AudioEngine {
                             }
                             EngineCommand::SetBpm(bpm) => {
                                 sequencer.bpm = bpm;
+                            }
+                            EngineCommand::SetClipLength { track_index, clip_index, length } => {
+                                if let Some(track) = project.tracks.get_mut(track_index) {
+                                    if let Some(clip) = track.clips.get_mut(clip_index) {
+                                        clip.length = length;
+                                        sequencer.set_length_in_beats(length);
+                                        eprintln!("[Engine] Updated Clip {}:{} Length to {} beats. Seq pattern_length is now {}", track_index, clip_index, length, sequencer.pattern_length);
+                                    }
+                                }
                             }
                             EngineCommand::SetPluginParam { track_index, id, value } => {
                                 // 1. Update Engine Node
@@ -379,7 +389,9 @@ impl AudioEngine {
                          
                          // Update UI step (floored beat * 4 for 16th notes)
                          let current_16th = (start_beat * 4.0) as u32;
-                         current_step_callback.store(current_16th % 16, Ordering::Relaxed);
+                         // Use dynamic pattern length from sequencer
+                         let len_steps = sequencer.pattern_length.max(1);
+                         current_step_callback.store(current_16th % len_steps, Ordering::Relaxed);
 
                          for (t_idx, track) in project.tracks.iter().enumerate() {
                              if t_idx < track_count && !track.mute {

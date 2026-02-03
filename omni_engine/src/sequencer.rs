@@ -65,4 +65,7 @@ impl Sequencer {
         self.current_step
     }
     
+    pub fn set_length_in_beats(&mut self, beats: f64) {
+        self.pattern_length = (beats * self.steps_per_beat as f64) as u32;
+    }
 }
