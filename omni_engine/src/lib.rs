@@ -34,7 +34,7 @@ pub enum EngineCommand {
     Pause,
     Stop,
     SetVolume(f32),
-    ToggleNote { track_index: usize, clip_index: usize, step: usize, note: u8 },
+    ToggleNote { track_index: usize, clip_index: usize, start: f64, duration: f64, note: u8 },
     SetMute { track_index: usize, muted: bool },
     SetBpm(f32),
     SetPluginParam { track_index: usize, id: u32, value: f32 },
@@ -154,16 +154,21 @@ impl AudioEngine {
                                     }
                                 }
                             }
-                            EngineCommand::ToggleNote { track_index, clip_index, step, note } => {
+                            EngineCommand::ToggleNote { track_index, clip_index, start, duration, note } => {
                                 if track_index < project.tracks.len() {
                                     if clip_index < project.tracks[track_index].clips.len() {
                                         let notes = &mut project.tracks[track_index].clips[clip_index].notes;
-                                        if step < notes.len() {
-                                             if notes[step].contains(&note) {
-                                                 notes[step].retain(|&n| n != note);
-                                             } else {
-                                                 notes[step].push(note);
-                                             }
+                                        // Simple exact match removal or add
+                                        if let Some(idx) = notes.iter().position(|n| n.key == note && (n.start - start).abs() < 0.001) {
+                                            notes.remove(idx);
+                                        } else {
+                                            notes.push(omni_shared::project::Note {
+                                                start,
+                                                duration,
+                                                key: note,
+                                                velocity: 100,
+                                                selected: false,
+                                            });
                                         }
                                     }
                                 }
@@ -362,19 +367,66 @@ impl AudioEngine {
                     }
                     
                     // 2b. If Playing: Generate Sequence Events (Note Ons)
+                    // 2b. If Playing: Generate Sequence Events (Note Ons)
                     if playing {
-                         if let Some((step, _offset)) = sequencer.advance(frames, sample_rate as f32) {
-                             current_step_callback.store(step as u32, Ordering::Relaxed);
-                             for (t_idx, track) in project.tracks.iter().enumerate() {
-                                 if t_idx < track_count && !track.mute {
-                                     if let Some(clip_idx) = track.active_clip_index {
-                                         if let Some(notes) = track.clips.get(clip_idx).and_then(|c| c.notes.get(step as usize)) {
-                                             for &note in notes {
-                                                 audio_buffers.track_events[t_idx].push(MidiNoteEvent {
-                                                     note, velocity: 100, channel: 0, sample_offset: 0,
-                                                 });
-                                                 if t_idx < active_notes.len() {
-                                                     active_notes[t_idx].push((note, 8800));
+                         // Calculate time range for this buffer
+                         let bpm = sequencer.bpm;
+                         let samples_per_beat = (sample_rate_val * 60.0) / bpm;
+                         let current_sample = pos_counter.load(Ordering::Relaxed);
+                         
+                         let start_beat = (current_sample as f64) / samples_per_beat as f64;
+                         let end_beat = ((current_sample + frames as u64) as f64) / samples_per_beat as f64;
+                         
+                         // Update UI step (floored beat * 4 for 16th notes)
+                         let current_16th = (start_beat * 4.0) as u32;
+                         current_step_callback.store(current_16th % 16, Ordering::Relaxed);
+
+                         for (t_idx, track) in project.tracks.iter().enumerate() {
+                             if t_idx < track_count && !track.mute {
+                                 if let Some(clip_idx) = track.active_clip_index {
+                                     if let Some(clip) = track.clips.get(clip_idx) {
+                                         // Check notes in this clip
+                                         // Ideally use a spatial map, but for <1000 notes linear scan is fine
+                                         let loop_len = clip.length; 
+                                         
+                                         for note in &clip.notes {
+                                             // Handle looping: Map note start to current window
+                                             // Simple approach: Check if note falls in [start_beat, end_beat) modulo loop
+                                             
+                                             // Allow for notes to be triggered in this window
+                                             // Note start relative to loop start
+                                             let relative_start = note.start % loop_len;
+                                             
+                                             // We need to check if 'relative_start' happens between 'start_beat' (mod loop) and 'end_beat' (mod loop)
+                                             // But wrapping makes this hard.
+                                             // Easier: Calculate absolute beats for potential occurrences in this window.
+                                             
+                                             let loop_start_beat = (start_beat / loop_len).floor() * loop_len;
+                                             let mut check_beat = loop_start_beat + relative_start;
+                                             
+                                             // If we are just before the note in previous loop, check next
+                                             if check_beat < start_beat {
+                                                 check_beat += loop_len;
+                                             }
+                                             
+                                             if check_beat >= start_beat && check_beat < end_beat {
+                                                 // Trigger!
+                                                 let offset_beats = check_beat - start_beat;
+                                                 let offset_samples = (offset_beats * samples_per_beat as f64) as u32;
+                                                 
+                                                 if offset_samples < frames as u32 {
+                                                     audio_buffers.track_events[t_idx].push(MidiNoteEvent {
+                                                         note: note.key,
+                                                         velocity: note.velocity,
+                                                         channel: 0,
+                                                         sample_offset: offset_samples,
+                                                     });
+                                                     
+                                                     if t_idx < active_notes.len() {
+                                                         // Calculate note duration in samples
+                                                         let dur_samples = (note.duration * samples_per_beat as f64) as u64;
+                                                         active_notes[t_idx].push((note.key, dur_samples));
+                                                     }
                                                  }
                                              }
                                          }

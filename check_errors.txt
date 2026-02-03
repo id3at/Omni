@@ -1,0 +1,110 @@
+    Checking omni_host v0.1.0 (/home/id3at/Moje/omni/omni_host)
+error[E0308]: mismatched types
+   --> omni_host/src/main.rs:571:25
+    |
+571 |                       let (rect, response) = ui.allocate_ui(
+    |  _________________________^^^^^^^^^^^^^^^^___-
+    | |                         |
+    | |                         expected `Rect`, found `(_, _)`
+572 | |                         available_size, // Take remaining space
+573 | |                         |ui| ui.max_rect()
+574 | |                     ).inner;
+    | |___________________________- this expression has type `eframe::egui::Rect`
+    |
+    = note: expected struct `eframe::egui::Rect`
+                found tuple `(_, _)`
+
+error[E0609]: no field `scroll_delta` on type `InputState`
+   --> omni_host/src/main.rs:590:34
+    |
+590 |                         if input.scroll_delta.y != 0.0 {
+    |                                  ^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+590 |                         if input.raw_scroll_delta.y != 0.0 {
+    |                                  ++++
+
+error[E0609]: no field `scroll_delta` on type `InputState`
+   --> omni_host/src/main.rs:591:86
+    |
+591 | ...                   self.piano_roll_zoom_x = (self.piano_roll_zoom_x + input.scroll_delta.y * 0.1).clamp(10.0, 200.0);
+    |                                                                                ^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+591 |                             self.piano_roll_zoom_x = (self.piano_roll_zoom_x + input.raw_scroll_delta.y * 0.1).clamp(10.0, 200.0);
+    |                                                                                      ++++
+
+error[E0609]: no field `scroll_delta` on type `InputState`
+   --> omni_host/src/main.rs:595:35
+    |
+595 |                          if input.scroll_delta.x != 0.0 || input.scroll_delta.y != 0.0 {
+    |                                   ^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+595 |                          if input.raw_scroll_delta.x != 0.0 || input.scroll_delta.y != 0.0 {
+    |                                   ++++
+
+error[E0609]: no field `scroll_delta` on type `InputState`
+   --> omni_host/src/main.rs:595:66
+    |
+595 |                          if input.scroll_delta.x != 0.0 || input.scroll_delta.y != 0.0 {
+    |                                                                  ^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+595 |                          if input.scroll_delta.x != 0.0 || input.raw_scroll_delta.y != 0.0 {
+    |                                                                  ++++
+
+error[E0609]: no field `scroll_delta` on type `InputState`
+   --> omni_host/src/main.rs:596:63
+    |
+596 | ...                   self.piano_roll_scroll_x -= input.scroll_delta.x;
+    |                                                         ^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+596 |                             self.piano_roll_scroll_x -= input.raw_scroll_delta.x;
+    |                                                               ++++
+
+error[E0609]: no field `scroll_delta` on type `InputState`
+   --> omni_host/src/main.rs:597:63
+    |
+597 | ...                   self.piano_roll_scroll_y -= input.scroll_delta.y; // Vertical scroll
+    |                                                         ^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+597 |                             self.piano_roll_scroll_y -= input.raw_scroll_delta.y; // Vertical scroll
+    |                                                               ++++
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+   --> omni_host/src/main.rs:667:38
+    |
+667 |   ...                   painter.rect_stroke(
+    |  _______________________________^^^^^^^^^^^-
+668 | | ...                       egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)),
+669 | | ...                       2.0,
+670 | | ...                       (1.0, egui::Color32::WHITE)
+671 | | ...                   );
+    | |_______________________- argument #4 of type `StrokeKind` is missing
+    |
+note: method defined here
+   --> /home/id3at/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.33.3/src/painter.rs:447:12
+    |
+447 |     pub fn rect_stroke(
+    |            ^^^^^^^^^^^
+help: provide the argument
+    |
+667 |                              painter.rect_stroke(
+668 |                                  egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)),
+669 |                                  2.0,
+670 ~                                  (1.0, egui::Color32::WHITE),
+671 +                                  /* StrokeKind */,
+    |
+
+Some errors have detailed explanations: E0061, E0308, E0609.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `omni_host` (bin "omni_host") due to 8 previous errors

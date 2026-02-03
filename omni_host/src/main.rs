@@ -6,15 +6,17 @@ use omni_shared::project::{Project};
 
 #[derive(Clone)]
 pub struct ClipData {
-    pub events: Vec<Vec<u8>>, // Step -> List of Notes
+    pub notes: Vec<omni_shared::project::Note>, 
     pub color: egui::Color32,
+    pub length: f64,
 }
 
 impl Default for ClipData {
     fn default() -> Self {
         Self {
-            events: vec![vec![]; 16],
+            notes: Vec::new(),
             color: egui::Color32::from_gray(60),
+            length: 4.0,
         }
     }
 }
@@ -97,6 +99,12 @@ pub struct OmniApp {
     selected_clip: usize,
     param_states: std::collections::HashMap<u32, f32>,
     selected_note: u8,
+    
+    // Piano Roll State
+    piano_roll_scroll_x: f32,
+    piano_roll_scroll_y: f32,
+    piano_roll_zoom_x: f32,
+    piano_roll_zoom_y: f32,
 }
 
 impl OmniApp {
@@ -134,6 +142,12 @@ impl OmniApp {
             selected_clip: 0,
             param_states: std::collections::HashMap::new(),
             selected_note: 60, // C3
+            
+            // Piano Roll State
+            piano_roll_scroll_x: 0.0,
+            piano_roll_scroll_y: 60.0 * 20.0, // Center roughly on C3
+            piano_roll_zoom_x: 50.0, // Pixels per beat
+            piano_roll_zoom_y: 20.0, // Pixels per note
         }
     }
 
@@ -165,7 +179,8 @@ impl OmniApp {
                          };
                          for (c_idx, shared_clip) in shared_track.clips.iter().enumerate() {
                              if c_idx < local_track.clips.len() {
-                                 local_track.clips[c_idx].events = shared_clip.notes.clone();
+                                 local_track.clips[c_idx].notes = shared_clip.notes.clone();
+                                 local_track.clips[c_idx].length = shared_clip.length;
                              }
                          }
                          self.tracks.push(local_track);
@@ -210,7 +225,12 @@ impl eframe::App for OmniApp {
         if self.is_playing && current_step != self.last_step {
             for track in self.tracks.iter_mut() {
                 if let Some(active_idx) = track.active_clip {
-                    if !track.clips[active_idx].events[current_step].is_empty() && !track.mute {
+                    let clip = &track.clips[active_idx];
+                    let step_start_beat = current_step as f64 * 0.25;
+                    let step_end_beat = step_start_beat + 0.25;
+                    
+                    // Flash if any note starts in this step
+                    if clip.notes.iter().any(|n| n.start >= step_start_beat && n.start < step_end_beat) && !track.mute {
                         track.trigger_flash = 1.0;
                     }
                 }
@@ -536,68 +556,177 @@ impl eframe::App for OmniApp {
             ui.separator();
             ui.add_space(10.0);
 
-            // PATTERN EDITOR (For Selected Clip)
+
+            // PIANO ROLL EDITOR
             if self.selected_track < self.tracks.len() {
                 let track_name = self.tracks[self.selected_track].name.clone();
                 if self.selected_clip < self.tracks[self.selected_track].clips.len() {
                     let clip = &mut self.tracks[self.selected_track].clips[self.selected_clip];
                     
-                    ui.heading(format!("Editor: {} - Clip {}", track_name, self.selected_clip));
+                    ui.heading(format!("Piano Roll: {} - Clip {}", track_name, self.selected_clip));
+                    ui.label("Controls: [LMB] Add Note | [RMB] Delete | [MMB/Mwheel] Pan | [Ctrl+Wheel] Zoom");
 
-                     // Note Selector
-                    ui.horizontal(|ui| {
-                        ui.label("Paint Note:");
-                        ui.add(egui::DragValue::new(&mut self.selected_note).speed(1).range(0..=127));
-                        ui.label(format!("(MIDI {})", self.selected_note));
-                    });
+                    // 1. Allocate Canvas
+                    let available_size = ui.available_size();
+                    let inner_response = ui.allocate_ui(
+                        available_size, // Take remaining space
+                        |ui| ui.max_rect()
+                    );
+                    let mut rect = inner_response.inner;
+                    let response = inner_response.response;
                     
-                    // Render Steps
-                    ui.horizontal(|ui| {
-                        for step in 0..16 {
-                            let is_current = self.is_playing && step == current_step;
-                            // Check if selected note is present (or any note?)
-                            // For simple view, show filled if ANY note is present.
-                            // If we want to show specific note presence, we check contains.
-                            let has_notes = !clip.events[step].is_empty();
-                            let has_selected_note = clip.events[step].contains(&self.selected_note);
-                            
-                            let base_color = if step % 4 == 0 { egui::Color32::from_gray(60) } else { egui::Color32::from_gray(40) };
-                            
-                            // Color logic: 
-                            // Blue = Has Selected Note
-                            // Dim Blue = Has Other Notes
-                            // Grey = Empty
-                            let fill_color = if has_selected_note { 
-                                egui::Color32::from_rgb(100, 200, 255) 
-                            } else if has_notes {
-                                egui::Color32::from_rgb(60, 100, 140)
-                            } else { 
-                                base_color 
-                            };
-                            
-                            let btn_size = egui::vec2(30.0, 40.0);
-                            let btn = egui::Button::new("")
-                                .fill(fill_color)
-                                .stroke(if is_current { egui::Stroke::new(2.0, egui::Color32::WHITE) } else { egui::Stroke::NONE });
-                            
-                            if ui.add_sized(btn_size, btn).clicked() {
-                                // Toggle selected note
-                                if has_selected_note {
-                                    clip.events[step].retain(|&n| n != self.selected_note);
-                                } else {
-                                    clip.events[step].push(self.selected_note);
-                                }
+                    // Force a minimum height if available size is small (e.g. initial layout)
+                    if rect.height() < 200.0 {
+                        rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 300.0));
+                    }
+                    
+                    let painter = ui.painter_at(rect);
+                    
+                    // 2. Input Handling (Navigation)
+                    let (scroll_delta, modifiers) = ui.input(|i| (i.raw_scroll_delta, i.modifiers));
+                    
+                    // Zoom (Ctrl + Scroll)
+                    if modifiers.ctrl {
+                        if scroll_delta.y != 0.0 {
+                            self.piano_roll_zoom_x = (self.piano_roll_zoom_x + scroll_delta.y * 0.1).clamp(10.0, 200.0);
+                        }
+                    } else {
+                        // Pan (Scroll Wheel or Middle Drag)
+                         if scroll_delta.x != 0.0 || scroll_delta.y != 0.0 {
+                            self.piano_roll_scroll_x -= scroll_delta.x;
+                            self.piano_roll_scroll_y -= scroll_delta.y; 
+                        }
+                    }
+                    if response.dragged_by(egui::PointerButton::Middle) {
+                         self.piano_roll_scroll_x -= response.drag_delta().x;
+                         self.piano_roll_scroll_y -= response.drag_delta().y;
+                    }
+
+                    // Clip Canvas
+                    let painter = painter.with_clip_rect(rect);
+                    
+                    // 3. Draw Background (Time Grid)
+                    let beat_width = self.piano_roll_zoom_x;
+                    let start_beat = (self.piano_roll_scroll_x / beat_width).max(0.0);
+                    let end_beat = start_beat + (rect.width() / beat_width);
+                    
+                    // Draw Beats
+                    for b in (start_beat as usize)..(end_beat as usize + 1) {
+                        let x = rect.left() + (b as f32 * beat_width) - self.piano_roll_scroll_x;
+                        if x >= rect.left() && x <= rect.right() {
+                            let color = if b % 4 == 0 { egui::Color32::from_gray(80) } else { egui::Color32::from_gray(40) };
+                            painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], (1.0, color));
+                        }
+                    }
+
+                    // 4. Draw Background (Pitch Grid)
+                    let note_height = self.piano_roll_zoom_y;
+                    // Y=0 is MIDI 127. Y=max is MIDI 0.
+                    
+                    for note in 0..128 {
+                        let y = rect.top() + ((127 - note) as f32 * note_height) - self.piano_roll_scroll_y;
+                        
+                        if y >= rect.top() - note_height && y <= rect.bottom() {
+                             // Black keys background
+                             let is_black = matches!(note % 12, 1 | 3 | 6 | 8 | 10);
+                             if is_black {
+                                 painter.rect_filled(
+                                     egui::Rect::from_min_size(egui::pos2(rect.left(), y), egui::vec2(rect.width(), note_height)),
+                                     0.0,
+                                     egui::Color32::from_rgba_premultiplied(30, 30, 30, 100)
+                                 );
+                             }
+                             painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], (1.0, egui::Color32::from_gray(30)));
+                             
+                             // Label C notes
+                             if note % 12 == 0 {
+                                 painter.text(
+                                    egui::pos2(rect.left() + 2.0, y + note_height/2.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    format!("C{}", note / 12 - 2),
+                                    egui::FontId::proportional(10.0),
+                                    egui::Color32::GRAY
+                                 );
+                             }
+                        }
+                    }
+                    
+                    // 5. Draw Notes
+                    for note in &clip.notes {
+                        let x = rect.left() + (note.start as f32 * beat_width) - self.piano_roll_scroll_x;
+                        let y = rect.top() + ((127 - note.key) as f32 * note_height) - self.piano_roll_scroll_y;
+                        let w = note.duration as f32 * beat_width;
+                        let h = note_height - 1.0;
+                        
+                        if x + w > rect.left() && x < rect.right() && y + h > rect.top() && y < rect.bottom() {
+                             painter.rect(
+                                 egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)),
+                                 2.0,
+                                 egui::Color32::from_rgb(100, 200, 255),
+                                 egui::Stroke::new(1.0, egui::Color32::WHITE),
+                                 egui::StrokeKind::Middle
+                             );
+                        }
+                    }
+
+                    // 6. Interaction: Add/Remove Note
+                    let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+                    if let Some(pos) = pointer_pos {
+                        if rect.contains(pos) {
+                            if ui.input(|i| i.pointer.primary_clicked()) {
+                                // Add Note
+                                let local_x = pos.x - rect.left() + self.piano_roll_scroll_x;
+                                let local_y = pos.y - rect.top() + self.piano_roll_scroll_y;
                                 
-                                // Send update to engine
-                                let _ = self.messenger.send(EngineCommand::ToggleNote { 
-                                    track_index: self.selected_track, 
-                                    clip_index: self.selected_clip, // Pass explict clip index!
-                                    step, 
-                                    note: self.selected_note 
-                                });
+                                let start_exact = local_x as f64 / beat_width as f64;
+                                let snap = 0.25;
+                                let start_snapped = (start_exact / snap).floor() * snap;
+                                
+                                let note_idx_raw = 127.0 - (local_y / note_height).floor();
+                                let note_idx = note_idx_raw.clamp(0.0, 127.0) as u8;
+
+                                // Check if note exists
+                                let exists = clip.notes.iter().any(|n| n.key == note_idx && (n.start - start_snapped).abs() < 0.001);
+                                if !exists {
+                                     clip.notes.push(omni_shared::project::Note {
+                                         start: start_snapped,
+                                         duration: 0.25, // Default length
+                                         key: note_idx,
+                                         velocity: 100,
+                                         selected: false,
+                                     });
+                                     let _ = self.messenger.send(EngineCommand::ToggleNote {
+                                         track_index: self.selected_track,
+                                         clip_index: self.selected_clip,
+                                         start: start_snapped,
+                                         duration: 0.25,
+                                         note: note_idx,
+                                     });
+                                }
+                            } else if ui.input(|i| i.pointer.secondary_clicked()) {
+                                // Delete Note
+                                let local_x = pos.x - rect.left() + self.piano_roll_scroll_x;
+                                let local_y = pos.y - rect.top() + self.piano_roll_scroll_y;
+                                let note_idx_raw = 127.0 - (local_y / note_height).floor();
+                                let note_idx = note_idx_raw.clamp(0.0, 127.0) as u8;
+                                let beat = local_x as f64 / beat_width as f64;
+
+                                if let Some(idx) = clip.notes.iter().position(|n| 
+                                    n.key == note_idx && beat >= n.start && beat < n.start + n.duration
+                                ) {
+                                    let n = clip.notes[idx].clone();
+                                    clip.notes.remove(idx);
+                                    let _ = self.messenger.send(EngineCommand::ToggleNote {
+                                         track_index: self.selected_track,
+                                         clip_index: self.selected_clip,
+                                         start: n.start,
+                                         duration: n.duration,
+                                         note: n.key,
+                                     });
+                                }
                             }
                         }
-                    });
+                    }
                 }
             }
 

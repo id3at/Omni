@@ -3,11 +3,20 @@ use uuid::Uuid;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Note {
+    pub start: f64,      // Start time in beats
+    pub duration: f64,   // Duration in beats
+    pub key: u8,         // MIDI note number
+    pub velocity: u8,    // 0-127
+    #[serde(skip)]
+    pub selected: bool,  // UI selection state
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Clip {
     pub name: String,
-    /// Matrix of notes: Step -> List of MIDI note numbers
-    pub notes: Vec<Vec<u8>>, 
-    pub length: u32,
+    pub notes: Vec<Note>, 
+    pub length: f64,     // Length in beats (was u32 steps)
     pub color: [u8; 3],
 }
 
@@ -15,8 +24,8 @@ impl Default for Clip {
     fn default() -> Self {
         Self {
             name: "New Clip".to_string(),
-            notes: vec![vec![]; 16],
-            length: 16,
+            notes: Vec::new(),
+            length: 4.0, // Default 1 bar (4 beats)
             color: [100, 100, 100],
         }
     }
