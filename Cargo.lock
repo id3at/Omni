@@ -2469,6 +2469,7 @@ dependencies = [
  "bincode",
  "cpal",
  "crossbeam-channel",
+ "fastrand",
  "omni_shared",
  "petgraph",
  "rayon",

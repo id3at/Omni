@@ -97,6 +97,8 @@ pub struct OmniApp {
     plugin_params: Vec<omni_shared::ParamInfo>,
     selected_track: usize,
     selected_clip: usize,
+    current_step: u32,
+    global_sample_pos: u64, // Added for polyrhythmic calculations
     param_states: std::collections::HashMap<u32, f32>,
     
     // Piano Roll State
@@ -106,7 +108,8 @@ pub struct OmniApp {
     piano_roll_zoom_y: f32,
     
     // Playback State
-    current_step: u32,
+    // Playback State
+
     
     // Interaction State
     drag_original_note: Option<omni_shared::project::Note>,
@@ -146,6 +149,8 @@ impl OmniApp {
             plugin_params: Vec::new(),
             selected_track: 0,
             selected_clip: 0,
+            current_step: 0,
+            global_sample_pos: 0,
             param_states: std::collections::HashMap::new(),
             
             // Piano Roll State
@@ -154,7 +159,6 @@ impl OmniApp {
             piano_roll_zoom_x: 50.0, // Pixels per beat
             piano_roll_zoom_y: 20.0, // Pixels per note
             
-            current_step: 0,
             
             drag_original_note: None,
             drag_accumulated_delta: egui::Vec2::ZERO,
@@ -231,11 +235,17 @@ impl eframe::App for OmniApp {
             0
         };
         
-        // Sync to struct for Piano Roll
-        self.current_step = current_step as u32;
+        // Update playback state
+        if let Some(ref engine) = self.engine {
+            self.current_step = engine.get_current_step();
+            self.global_sample_pos = engine.get_sample_position() as u64;
+        } else {
+            self.current_step = 0;
+            self.global_sample_pos = 0;
+        }
 
         // Handle trigger flashes
-        if self.is_playing && current_step != self.last_step {
+        if self.is_playing && (self.current_step as usize) != self.last_step {
             for track in self.tracks.iter_mut() {
                 if let Some(active_idx) = track.active_clip {
                     let clip = &track.clips[active_idx];
@@ -601,8 +611,12 @@ impl eframe::App for OmniApp {
 
                     // 1. Allocate Canvas
                     let available_size = ui.available_size();
-                    let inner_response = ui.allocate_ui(
-                        available_size, // Take remaining space
+                    let expr_panel_height = 80.0;
+                    let piano_height = (available_size.y - expr_panel_height).max(200.0);
+                    let piano_size = egui::vec2(available_size.x, piano_height);
+                    
+                    let inner_response = ui.allocate_ui_at_rect(
+                        egui::Rect::from_min_size(ui.cursor().min, piano_size),
                         |ui| ui.max_rect()
                     );
                     let mut rect = inner_response.inner;
@@ -776,10 +790,17 @@ impl eframe::App for OmniApp {
                              let note_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
                              
                              // Visuals
+                             // Visuals
+                             let color = if note.selected {
+                                 egui::Color32::from_rgb(150, 255, 150)
+                             } else {
+                                 egui::Color32::from_rgb(100, 200, 255)
+                             };
+                             
                              painter.rect(
                                  note_rect,
                                  2.0,
-                                 egui::Color32::from_rgb(100, 200, 255),
+                                 color,
                                  egui::Stroke::new(1.0, egui::Color32::WHITE),
                                  egui::StrokeKind::Middle
                              );
@@ -851,7 +872,8 @@ impl eframe::App for OmniApp {
                                      ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                                  }
                                  
-                                 if body_response.drag_started() {
+                                 if body_response.clicked() || body_response.drag_started() {
+                                     note.selected = true;
                                      self.drag_original_note = Some(note.clone());
                                      self.drag_accumulated_delta = egui::Vec2::ZERO;
                                  }
@@ -949,6 +971,9 @@ impl eframe::App for OmniApp {
                                      duration: 0.25, 
                                      key: note_idx,
                                      velocity: 100,
+                                     probability: 1.0,
+                                     velocity_deviation: 0,
+                                     condition: omni_shared::project::NoteCondition::Always,
                                      selected: false,
                                  });
                                  let _ = self.messenger.send(EngineCommand::ToggleNote {
@@ -962,27 +987,123 @@ impl eframe::App for OmniApp {
                         }
                     }
                     
-                    // 7. Draw Playhead
-                    if self.is_playing {
-                        // Current step is 1/4 steps. 
-                        // So beat = step * 0.25
-                        // Ideally we want smoother interpolation but step is what we have from engine event.
-                        let playhead_beat = self.current_step as f32 * 0.25;
-                        let x = rect.left() + (playhead_beat * beat_width) - self.piano_roll_scroll_x;
-                        
-                        if x >= rect.left() && x <= rect.right() {
-                            painter.line_segment(
-                                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                                (2.0, egui::Color32::from_rgb(255, 50, 50))
-                            );
+                    // 5. Draw Playhead (Polyrhythmic / Independent)
+                    if let Some(engine) = &self.engine {
+                        if engine.is_playing() {
+                            let sample_rate = 44100.0; // Assume standard for now (ideally get from engine config)
+                            let bpm = 120.0; // Ideally get from engine settings
+                            let samples_per_beat = (sample_rate * 60.0) / bpm;
                             
-                            // Head
-                            painter.circle_filled(
-                                egui::pos2(x, rect.top() + 5.0),
-                                5.0,
-                                egui::Color32::from_rgb(255, 50, 50)
-                            );
+                            // Calculate where the playhead is *within* this specific clip's loop length
+                            // Global Beat Position
+                            let global_beat = self.global_sample_pos as f64 / samples_per_beat as f64;
+                            // Local Beat Position (Modulo Clip Length)
+                            let local_beat = global_beat % clip.length;
+                            
+                            let playhead_x = rect.left() + (local_beat as f32 * beat_width) - self.piano_roll_scroll_x;
+
+                            if playhead_x >= rect.left() && playhead_x <= rect.right() {
+                                painter.line_segment(
+                                    [egui::pos2(playhead_x, rect.top()), egui::pos2(playhead_x, rect.bottom())],
+                                    (2.0, egui::Color32::from_rgb(0, 200, 255))
+                                );
+                                 // Triangle indicator at top
+                                 let triangle_size = 6.0;
+                                 painter.add(egui::Shape::convex_polygon(
+                                     vec![
+                                         egui::pos2(playhead_x, rect.top()),
+                                         egui::pos2(playhead_x - triangle_size, rect.top() + triangle_size),
+                                         egui::pos2(playhead_x + triangle_size, rect.top() + triangle_size),
+                                     ],
+                                     egui::Color32::from_rgb(0, 200, 255),
+                                     egui::Stroke::NONE
+                                 ));
+                            }
                         }
+                    }
+                    
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.heading("Note Expressions (Selected Note)");
+                    
+                    // Find selected note
+                    let mut selected_idx = None;
+                    for (i, n) in clip.notes.iter().enumerate() {
+                        if n.selected {
+                            selected_idx = Some(i);
+                            break;
+                        }
+                    }
+                    
+                    if let Some(idx) = selected_idx {
+                        let note = &mut clip.notes[idx];
+                        let mut changed = false;
+                        
+                        ui.horizontal(|ui| {
+                            // Probability
+                            ui.label("Chance:");
+                            let prob_before = note.probability;
+                            ui.add(egui::Slider::new(&mut note.probability, 0.0..=1.0).text("%"));
+                            if (note.probability - prob_before).abs() > 0.001 { changed = true; }
+                            
+                            ui.separator();
+                            
+                            // Velocity Deviation
+                            ui.label("Vel Dev:");
+                            let dev_before = note.velocity_deviation;
+                            ui.add(egui::Slider::new(&mut note.velocity_deviation, -64..=64).text("+/-"));
+                            if note.velocity_deviation != dev_before { changed = true; }
+
+                            ui.separator();
+
+                            // Condition
+                            ui.label("Condition:");
+                            let cond_before = note.condition;
+                            
+                            egui::ComboBox::from_id_salt("note_cond")
+                                .selected_text(format!("{:?}", note.condition))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut note.condition, omni_shared::project::NoteCondition::Always, "Always");
+                                    ui.selectable_value(&mut note.condition, omni_shared::project::NoteCondition::PreviousNotePlayed, "Prev Played");
+                                    ui.selectable_value(&mut note.condition, omni_shared::project::NoteCondition::PreviousNoteSilenced, "Prev Silenced");
+                                    ui.separator();
+                                    ui.selectable_value(&mut note.condition, omni_shared::project::NoteCondition::Iteration { expected: 1, cycle: 2 }, "1 / 2");
+                                    ui.selectable_value(&mut note.condition, omni_shared::project::NoteCondition::Iteration { expected: 2, cycle: 2 }, "2 / 2");
+                                    ui.selectable_value(&mut note.condition, omni_shared::project::NoteCondition::Iteration { expected: 1, cycle: 4 }, "1 / 4");
+                                    ui.selectable_value(&mut note.condition, omni_shared::project::NoteCondition::Iteration { expected: 4, cycle: 4 }, "4 / 4");
+                                });
+                            if note.condition != cond_before { changed = true; }
+                        });
+                        
+                        if changed {
+                            // Update Engine (Remove Old -> Add New)
+                            // IMPORTANT: Currently ToggleNote relies on Note struct in Engine matching Key/Start.
+                            // But here we are sending a NEW note with NEW properties.
+                            // The engine sees "ToggleNote".
+                            // If it finds a match (Key/Start), it removes it.
+                            // Then we send AGAIN to add the new one.
+                            // Since we didn't change Key/Start here, the first call finds and removes.
+                            // The second call adds with new props.
+                            
+                            // 1. Remove
+                             let _ = self.messenger.send(EngineCommand::ToggleNote {
+                                track_index: self.selected_track,
+                                clip_index: self.selected_clip,
+                                start: note.start,
+                                duration: note.duration,
+                                note: note.key,
+                            });
+                            // 2. Add
+                             let _ = self.messenger.send(EngineCommand::ToggleNote {
+                                track_index: self.selected_track,
+                                clip_index: self.selected_clip,
+                                start: note.start,
+                                duration: note.duration,
+                                note: note.key,
+                            });
+                        }
+                    } else {
+                        ui.label("No note selected.");
                     }
                 }
             }

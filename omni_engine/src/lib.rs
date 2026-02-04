@@ -139,8 +139,7 @@ impl AudioEngine {
                                 if let Some(track) = project.tracks.get_mut(track_index) {
                                     if let Some(clip) = track.clips.get_mut(clip_index) {
                                         clip.length = length;
-                                        sequencer.set_length_in_beats(length);
-                                        eprintln!("[Engine] Updated Clip {}:{} Length to {} beats. Seq pattern_length is now {}", track_index, clip_index, length, sequencer.pattern_length);
+                                        eprintln!("[Engine] Updated Clip {}:{} Length to {} beats. Seq pattern_length remains {}", track_index, clip_index, length, sequencer.pattern_length);
                                     }
                                 }
                             }
@@ -177,6 +176,9 @@ impl AudioEngine {
                                                 duration,
                                                 key: note,
                                                 velocity: 100,
+                                                probability: 1.0,
+                                                velocity_deviation: 0,
+                                                condition: omni_shared::project::NoteCondition::Always,
                                                 selected: false,
                                             });
                                         }
@@ -422,6 +424,30 @@ impl AudioEngine {
                                              }
                                              
                                              if check_beat >= start_beat && check_beat < end_beat {
+                                                 // STOCHASTIC CHECKS
+                                                 // 1. Probability
+                                                 if note.probability < 1.0 && fastrand::f64() > note.probability {
+                                                     continue;
+                                                 }
+                                                 
+                                                 // 2. Condition (Loop Iteration)
+                                                 if let omni_shared::project::NoteCondition::Iteration { expected, cycle } = note.condition {
+                                                      let iteration = (check_beat / loop_len).floor() as u64;
+                                                      // 1-based index (1..cycle)
+                                                      let current_cycle_idx = (iteration % cycle as u64) as u8 + 1;
+                                                      if current_cycle_idx != expected {
+                                                          continue;
+                                                      }
+                                                 }
+                                                 
+                                                 // 3. Velocity Deviation
+                                                 let mut velocity = note.velocity;
+                                                 if note.velocity_deviation != 0 {
+                                                     let dev = note.velocity_deviation as i32;
+                                                     let rnd = fastrand::i32(-dev.abs()..=dev.abs());
+                                                     velocity = (velocity as i32 + rnd).clamp(1, 127) as u8;
+                                                 }
+
                                                  // Trigger!
                                                  let offset_beats = check_beat - start_beat;
                                                  let offset_samples = (offset_beats * samples_per_beat as f64) as u32;
@@ -429,7 +455,7 @@ impl AudioEngine {
                                                  if offset_samples < frames as u32 {
                                                      audio_buffers.track_events[t_idx].push(MidiNoteEvent {
                                                          note: note.key,
-                                                         velocity: note.velocity,
+                                                         velocity,
                                                          channel: 0,
                                                          sample_offset: offset_samples,
                                                      });
@@ -520,10 +546,9 @@ impl AudioEngine {
         self.is_playing.load(Ordering::Relaxed)
     }
 
-    pub fn sample_position(&self) -> u64 {
+    pub fn get_sample_position(&self) -> u64 {
         self.sample_position.load(Ordering::Relaxed)
     }
-
 
     pub fn get_current_step(&self) -> u32 {
         self.current_step.load(Ordering::Relaxed)
