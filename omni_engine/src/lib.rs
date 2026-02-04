@@ -34,7 +34,16 @@ pub enum EngineCommand {
     Pause,
     Stop,
     SetVolume(f32),
-    ToggleNote { track_index: usize, clip_index: usize, start: f64, duration: f64, note: u8 },
+    ToggleNote { 
+        track_index: usize, 
+        clip_index: usize, 
+        start: f64, 
+        duration: f64, 
+        note: u8,
+        probability: f64,
+        velocity_deviation: i8,
+        condition: omni_shared::project::NoteCondition,
+    },
     SetMute { track_index: usize, muted: bool },
     SetBpm(f32),
     SetPluginParam { track_index: usize, id: u32, value: f32 },
@@ -163,7 +172,7 @@ impl AudioEngine {
                                     }
                                 }
                             }
-                            EngineCommand::ToggleNote { track_index, clip_index, start, duration, note } => {
+                            EngineCommand::ToggleNote { track_index, clip_index, start, duration, note, probability, velocity_deviation, condition } => {
                                 if track_index < project.tracks.len() {
                                     if clip_index < project.tracks[track_index].clips.len() {
                                         let notes = &mut project.tracks[track_index].clips[clip_index].notes;
@@ -176,9 +185,9 @@ impl AudioEngine {
                                                 duration,
                                                 key: note,
                                                 velocity: 100,
-                                                probability: 1.0,
-                                                velocity_deviation: 0,
-                                                condition: omni_shared::project::NoteCondition::Always,
+                                                probability,
+                                                velocity_deviation,
+                                                condition,
                                                 selected: false,
                                             });
                                         }
