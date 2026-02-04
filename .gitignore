@@ -6,3 +6,6 @@
 .gemini
 tomic-linux/
 dummy_plugin/
+
+# Binaries
+omni_plugin_host/check_clap
