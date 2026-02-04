@@ -42,7 +42,29 @@ impl PluginNode {
         }
 
         // 2. Spawn Plugin Host
-        let mut child = Command::new("./target/debug/omni_plugin_host")
+        // Check for release binary first if in release mode, otherwise debug
+        let debug_path = "./target/debug/omni_plugin_host";
+        let release_path = "./target/release/omni_plugin_host";
+        
+        // Use release binary if we are in release mode OR if debug binary doesn't exist but release does
+        let binary_path = if !cfg!(debug_assertions) && std::path::Path::new(release_path).exists() {
+            eprintln!("[PluginNode] Using Release Binary: {}", release_path);
+            release_path
+        } else if std::path::Path::new(debug_path).exists() {
+            eprintln!("[PluginNode] Using Debug Binary: {}", debug_path);
+            debug_path
+        } else {
+            // Fallback to release if debug missing
+             if std::path::Path::new(release_path).exists() {
+                 eprintln!("[PluginNode] Debug missing, using Release Binary: {}", release_path);
+                 release_path
+             } else {
+                 eprintln!("[PluginNode] neither debug nor release binary found, trying debug path");
+                 debug_path
+             }
+        };
+
+        let mut child = Command::new(binary_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) 
@@ -255,6 +277,16 @@ impl AudioNode for PluginNode {
             }
         }
     }
+
+    fn get_note_names(&mut self) -> (String, Vec<omni_shared::NoteNameInfo>) {
+        match self.query_note_names() {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("[PluginNode] Failed to query note names from {}: {}", self.plugin_path, e);
+                (String::new(), Vec::new())
+            }
+        }
+    }
 }
 
 impl PluginNode {
@@ -277,5 +309,27 @@ impl PluginNode {
         }
         
         Err(anyhow::anyhow!("Failed to get parameter info"))
+    }
+
+    /// Query note names from plugin, returns (clap_id, note_names)
+    pub fn query_note_names(&mut self) -> Result<(String, Vec<omni_shared::NoteNameInfo>), anyhow::Error> {
+        if let Some(stdin) = &mut self.stdin {
+            let cmd = HostCommand::GetNoteNames;
+            let serialized = bincode::serialize(&cmd)?;
+            writeln!(stdin, "{}", BASE64.encode(serialized))?;
+            stdin.flush()?;
+        }
+
+        if let Some(reader) = &mut self.reader {
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            let decoded = BASE64.decode(line.trim())?;
+            let event: PluginEvent = bincode::deserialize(&decoded)?;
+            if let PluginEvent::NoteNameList { clap_id, names } = event {
+                return Ok((clap_id, names));
+            }
+        }
+
+        Err(anyhow::anyhow!("Failed to get note names"))
     }
 }

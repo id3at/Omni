@@ -19,6 +19,10 @@ pub trait AudioNode: Send + Sync {
 
     /// Open Native Editor
     fn open_editor(&mut self) {}
+
+    /// Get note names from plugin (CLAP note_name extension)
+    /// Returns: (clap_id, note_names) - clap_id used for fallback mappings
+    fn get_note_names(&mut self) -> (String, Vec<omni_shared::NoteNameInfo>) { (String::new(), Vec::new()) }
 }
 
 pub struct SineNode {

@@ -202,6 +202,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 HostCommand::OpenEditor => {
                     let _ = event_loop_proxy.send_event(CustomEvent::OpenEditor);
                 }
+                HostCommand::GetNoteNames => {
+                    let guard = plugin_for_ipc.read().unwrap();
+                    let (names, clap_id) = if let Some(ref p) = *guard {
+                        (unsafe { p.get_note_names() }, p.clap_id.clone())
+                    } else {
+                        (Vec::new(), String::new())
+                    };
+                    let _ = send_event(PluginEvent::NoteNameList { clap_id, names });
+                }
                 HostCommand::Shutdown => {
                     std::process::exit(0);
                 }

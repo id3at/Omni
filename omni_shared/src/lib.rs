@@ -49,6 +49,8 @@ pub enum HostCommand {
     GetParamInfo,
     /// Open the plugin's native editor window
     OpenEditor,
+    /// Request note names from plugin (CLAP note_name extension)
+    GetNoteNames,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -59,6 +61,17 @@ pub struct ParamInfo {
     pub max_value: f64,
     pub default_value: f64,
     pub flags: u32,
+}
+
+/// Note name information from CLAP plugin's note_name extension
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NoteNameInfo {
+    /// MIDI key (-1 means all keys)
+    pub key: i16,
+    /// MIDI channel (-1 means all channels)
+    pub channel: i16,
+    /// Human-readable name for this note
+    pub name: String,
 }
 
 /// Events sent from Plugin Process to Host via IPC (e.g., Stdout/Pipe)
@@ -76,6 +89,9 @@ pub enum PluginEvent {
     FrameProcessed,
     /// Parameter information list
     ParamInfoList(Vec<ParamInfo>),
+    /// Note name information list (from CLAP note_name extension or fallback)
+    /// Contains: (clap_id, note_names) - clap_id allows host to apply hardcoded mappings
+    NoteNameList { clap_id: String, names: Vec<NoteNameInfo> },
 }
 
 /// Configuration for Shared Memory Region

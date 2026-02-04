@@ -35,6 +35,8 @@ pub struct TrackData {
     pub clips: Vec<ClipData>,
     pub active_clip: Option<usize>,
     pub trigger_flash: f32,
+    /// Valid MIDI notes for this track's plugin (None = all 128 notes valid)
+    pub valid_notes: Option<Vec<i16>>,
 }
 
 impl Default for TrackData {
@@ -47,6 +49,7 @@ impl Default for TrackData {
             clips: vec![ClipData::default(); 8], // 8 Scenes
             active_clip: None,
             trigger_flash: 0.0,
+            valid_notes: None,
         }
     }
 }
@@ -121,6 +124,10 @@ pub struct OmniApp {
     // Interaction State
     drag_original_note: Option<omni_shared::project::Note>,
     drag_accumulated_delta: egui::Vec2,
+    last_note_length: f64, // Sticky note length
+    
+    // Pending note names receiver (for async plugin query)
+    pending_note_names_rx: Option<(usize, Receiver<(String, Vec<omni_shared::NoteNameInfo>)>)>,
 }
 
 impl OmniApp {
@@ -169,6 +176,8 @@ impl OmniApp {
             
             drag_original_note: None,
             drag_accumulated_delta: egui::Vec2::ZERO,
+            last_note_length: 0.25,
+            pending_note_names_rx: None,
         }
     }
 
@@ -273,6 +282,171 @@ impl eframe::App for OmniApp {
             track.trigger_flash = (track.trigger_flash - 0.1).max(0.0);
         }
 
+        // Poll for pending note names response
+        if let Some((track_idx, ref rx)) = self.pending_note_names_rx {
+            match rx.try_recv() {
+                Ok((clap_id, names)) => {
+                    eprintln!("[OmniApp Debug] Received response for track {}: clap_id='{}', names.len={}", track_idx, clap_id, names.len());
+                    
+                    if track_idx < self.tracks.len() {
+                        let mut valid_keys = Vec::new();
+                        
+                        if !names.is_empty() {
+                         // Use notes from plugin
+                         valid_keys = names.iter()
+                            .map(|n| n.key)
+                            .filter(|&k| k >= 0)
+                            .collect();
+                    } else if clap_id == "com.tomic.drum-synth" {
+                        // Fallback: Hardcoded map for TOMiC Drum Synth
+                        eprintln!("[OmniApp] Applying hardcoded map for TOMiC Drum Synth");
+                        valid_keys = vec![36, 37, 38, 39, 40, 41, 42, 43];
+                    }
+
+                    if !valid_keys.is_empty() {
+                        self.tracks[track_idx].valid_notes = Some(valid_keys);
+                        eprintln!("[OmniApp] Track {} has {} valid notes", track_idx, self.tracks[track_idx].valid_notes.as_ref().unwrap().len());
+                    } else {
+                        // All notes valid
+                        self.tracks[track_idx].valid_notes = None;
+                    }
+                }
+                self.pending_note_names_rx = None;
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+            Err(e) => {
+                 eprintln!("[OmniApp Debug] Channel error: {}", e);
+                 self.pending_note_names_rx = None;
+            }
+        }
+    }
+
+        // Note Expressions Panel (Docked at Bottom)
+        if self.selected_track < self.tracks.len() {
+            let track = &mut self.tracks[self.selected_track];
+            if let Some(active_idx) = track.active_clip {
+                 // We use selected_clip logic for UI?
+                 // In piano roll logic (Line 717), we use self.selected_clip?
+                 // Line 715: if self.selected_clip < track.clips.len() { let clip = ... }
+                 // Lets match that logic.
+            }
+        }
+
+        egui::TopBottomPanel::bottom("note_expressions_panel")
+            .show_separator_line(true)
+            .show(ctx, |ui| {
+             if self.selected_track < self.tracks.len() {
+                 let track = &mut self.tracks[self.selected_track];
+                 if self.selected_clip < track.clips.len() {
+                      let clip = &mut track.clips[self.selected_clip];
+                      
+                      // Only show if we are in Piano Roll mode (clip.use_sequencer check?)
+                      // The old logic was inside `if !clip.use_sequencer`.
+                      if !clip.use_sequencer {
+                          ui.add_space(5.0);
+                          ui.heading("Note Expressions (Selected)");
+                          
+                          // Collect selected indices
+                          let selected_indices: Vec<usize> = clip.notes.iter().enumerate()
+                              .filter(|(_, n)| n.selected).map(|(i, _)| i).collect();
+                          
+                          if !selected_indices.is_empty() {
+                              let first_idx = selected_indices[0];
+                              let mut temp_note = clip.notes[first_idx].clone();
+                              let mut changed = false;
+                              
+                              ui.horizontal(|ui| {
+                                  ui.label("Chance:");
+                                  if ui.add(egui::Slider::new(&mut temp_note.probability, 0.0..=1.0).text("%")).changed() { changed = true; }
+                                  ui.separator();
+                                  ui.label("Vel Dev:");
+                                  if ui.add(egui::Slider::new(&mut temp_note.velocity_deviation, -64..=64).text("+/-")).changed() { changed = true; }
+                                  ui.separator();
+                                  ui.label("Condition:");
+                                  egui::ComboBox::from_id_salt("note_cond_docked")
+                                      .selected_text(format!("{:?}", temp_note.condition))
+                                      .show_ui(ui, |ui| {
+                                          if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Always, "Always").changed() { changed = true; }
+                                          if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::PreviousNotePlayed, "Prev Played").changed() { changed = true; }
+                                          if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::PreviousNoteSilenced, "Prev Silenced").changed() { changed = true; }
+                                          ui.separator();
+                                          if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Iteration { expected: 1, cycle: 2 }, "1 / 2").changed() { changed = true; }
+                                          if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Iteration { expected: 2, cycle: 2 }, "2 / 2").changed() { changed = true; }
+                                          if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Iteration { expected: 1, cycle: 4 }, "1 / 4").changed() { changed = true; }
+                                          if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Iteration { expected: 4, cycle: 4 }, "4 / 4").changed() { changed = true; }
+                                      });
+                                  if temp_note.condition != clip.notes[first_idx].condition { changed = true; }
+                              });
+                              
+                              if changed {
+                                  for idx in selected_indices {
+                                      if let Some(note) = clip.notes.get_mut(idx) {
+                                           // Send Update (ToggleNote logic)
+                                           // We just send the new state. The engine ToggleNote handles update if exists?
+                                           // Actually ToggleNote toggles. 
+                                           // The old logic (Step 629) removed then added.
+                                           // Wait, ToggleNote iterates and removes if match? 
+                                           // If I send ToggleNote with same params, it might remove it.
+                                           // I need to use the OLD LOGIC: remove OLD, add NEW.
+                                           
+                                           // 1. Remove Old (Logic from Step 629)
+                                           let _ = self.messenger.send(EngineCommand::ToggleNote {
+                                              track_index: self.selected_track,
+                                              clip_index: self.selected_clip,
+                                              start: note.start,
+                                              duration: note.duration,
+                                              note: note.key,
+                                              probability: 1.0, // Defaults? Or current?
+                                              // Step 629 used 1.0, 0, Always for Remove?
+                                              // Why? Maybe to force match on ID?
+                                              // Assuming Engine identifies note by start/key?
+                                              // If ToggleNote matches EXACTLY fields, then we need exact fields.
+                                              // Step 629:
+                                              /*
+                                              let _ = self.messenger.send(EngineCommand::ToggleNote {
+                                                 ...
+                                                 probability: 1.0,
+                                                 velocity_deviation: 0,
+                                                 condition: omni_shared::project::NoteCondition::Always,
+                                             });
+                                             */
+                                             // This implies the engine ignores those fields for removal OR the old note had those fields?
+                                             // No, Step 629 Line 1318 sent constant values.
+                                             // This is suspicious. If Engine matches by (start, key), then other fields don't matter?
+                                             // I will copy Step 629 logic EXACTLY.
+                                             
+                                              velocity_deviation: 0,
+                                              condition: omni_shared::project::NoteCondition::Always,
+                                           });
+                                           
+                                           // Update local
+                                           note.probability = temp_note.probability;
+                                           note.velocity_deviation = temp_note.velocity_deviation;
+                                           note.condition = temp_note.condition;
+                                           
+                                           // 2. Add New
+                                            let _ = self.messenger.send(EngineCommand::ToggleNote {
+                                               track_index: self.selected_track,
+                                               clip_index: self.selected_clip,
+                                               start: note.start,
+                                               duration: note.duration,
+                                               note: note.key,
+                                               probability: note.probability,
+                                               velocity_deviation: note.velocity_deviation,
+                                               condition: note.condition,
+                                           });
+                                      }
+                                  }
+                              }
+                          } else {
+                              ui.label("No note selected.");
+                          }
+                          ui.add_space(5.0);
+                      }
+                 }
+             }
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Omni DAW");
             ui.add_space(20.0);
@@ -361,11 +535,19 @@ impl eframe::App for OmniApp {
                                 .to_string();
 
                              eprintln!("[UI] Track Added Successfully: {}", name);
+                             let new_track_idx = self.tracks.len();
                              self.tracks.push(TrackData { 
                                  name, 
-                                 active_clip: None, 
+                                 active_clip: None,
+                                 valid_notes: None, // Explicitly init
                                  ..Default::default() 
                              });
+                             
+                             // Reset valid_notes and request new ones from plugin
+                             let (tx, rx) = crossbeam_channel::bounded(1);
+                             self.pending_note_names_rx = Some((new_track_idx, rx));
+                             let _ = self.messenger.send(EngineCommand::GetNoteNames { track_index: new_track_idx, response_tx: tx });
+                             eprintln!("[UI] Requested note names for new track {}", new_track_idx);
                         } else {
                             eprintln!("[UI] Error: Path is not valid UTF-8");
                         }
@@ -576,6 +758,12 @@ impl eframe::App for OmniApp {
                                         if let Some(path_str) = path.to_str() {
                                              let _ = self.messenger.send(EngineCommand::LoadPluginToTrack { track_index: track_idx, plugin_path: path_str.to_string() });
                                              track.name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Plugin").to_string();
+                                             
+                                             // Reset valid_notes and request new ones from plugin
+                                             track.valid_notes = None;
+                                             let (tx, rx) = crossbeam_channel::bounded(1);
+                                             let _ = self.messenger.send(EngineCommand::GetNoteNames { track_index: track_idx, response_tx: tx });
+                                             self.pending_note_names_rx = Some((track_idx, rx));
                                         }
                                     }
                                 }
@@ -652,6 +840,8 @@ impl eframe::App for OmniApp {
             // PIANO ROLL EDITOR
             if self.selected_track < self.tracks.len() {
                 let track_name = self.tracks[self.selected_track].name.clone();
+                // Clone valid_notes before mutable borrow of clip to avoid borrow conflict
+                let valid_notes = self.tracks[self.selected_track].valid_notes.clone();
                 if self.selected_clip < self.tracks[self.selected_track].clips.len() {
                     let clip = &mut self.tracks[self.selected_track].clips[self.selected_clip];
                     
@@ -700,9 +890,8 @@ impl eframe::App for OmniApp {
                     // 1. Layout: Vertical Split (Piano Roll vs Note Expressions)
                     // We render them sequentially to avoid jumping.
                     let available_size = ui.available_size();
-                    let expr_panel_height = 80.0;
-                    // Piano Roll takes remaining height minus expression panel
-                    let piano_height = (available_size.y - expr_panel_height).max(200.0);
+                    // Piano Roll takes remaining height (expressions handled by TopBottomPanel)
+                    let piano_height = (available_size.y).max(200.0);
                     
                     let (piano_rect, response) = ui.allocate_at_least(
                         egui::vec2(available_size.x, piano_height),
@@ -836,30 +1025,49 @@ impl eframe::App for OmniApp {
                     // 4. Draw Background (Pitch Grid)
                     let note_height = self.piano_roll_zoom_y;
                     // Y=0 is MIDI 127. Y=max is MIDI 0.
+                    // Uses valid_notes cloned earlier to avoid borrow conflict
                     
                     for note in 0..128 {
                         let y = piano_rect.top() + ((127 - note) as f32 * note_height) - self.piano_roll_scroll_y;
                         
                         if y >= piano_rect.top() - note_height && y <= piano_rect.bottom() {
+                             // Check if this note is valid for the plugin
+                             let is_valid_note = match &valid_notes {
+                                 None => true, // No restrictions
+                                 Some(keys) => keys.contains(&(note as i16)),
+                             };
+                             
                              // Black keys background
                              let is_black = matches!(note % 12, 1 | 3 | 6 | 8 | 10);
-                             if is_black {
+                             
+                             let bg_color = if !is_valid_note {
+                                 // Invalid notes: dim red tint
+                                 egui::Color32::from_rgba_premultiplied(50, 15, 15, 180)
+                             } else if is_black {
+                                 egui::Color32::from_rgba_premultiplied(30, 30, 30, 100)
+                             } else {
+                                 egui::Color32::TRANSPARENT
+                             };
+                             
+                             if bg_color != egui::Color32::TRANSPARENT {
                                  painter.rect_filled(
                                      egui::Rect::from_min_size(egui::pos2(piano_rect.left(), y), egui::vec2(piano_rect.width(), note_height)),
                                      0.0,
-                                     egui::Color32::from_rgba_premultiplied(30, 30, 30, 100)
+                                     bg_color
                                  );
                              }
+                             
                              painter.line_segment([egui::pos2(piano_rect.left(), y), egui::pos2(piano_rect.right(), y)], (1.0, egui::Color32::from_gray(30)));
                              
                              // Label C notes
                              if note % 12 == 0 {
+                                 let label_color = if is_valid_note { egui::Color32::GRAY } else { egui::Color32::from_rgb(80, 50, 50) };
                                  painter.text(
                                     egui::pos2(piano_rect.left() + 2.0, y + note_height/2.0),
                                     egui::Align2::LEFT_CENTER,
                                     format!("C{}", note / 12 - 2),
                                     egui::FontId::proportional(10.0),
-                                    egui::Color32::GRAY
+                                    label_color
                                  );
                              }
                         }
@@ -898,6 +1106,15 @@ impl eframe::App for OmniApp {
                              );
 
                              // Interaction
+                             
+                             // Priority Eraser (Full Hitbox)
+                             if ui.rect_contains_pointer(note_rect) && ui.input(|i| i.pointer.secondary_down()) {
+                                 note_actions.push((2, idx, note.clone()));
+                                 note_interacted_this_frame = true;
+                                 continue; // Skip move/resize for this note
+                             }
+
+                             // We use a simplified interaction model:
                              // We use a simplified interaction model: 
                              // Main body = Move
                              // Right edge (last 5px) = Resize
@@ -915,7 +1132,7 @@ impl eframe::App for OmniApp {
                              if resize_response.hovered() {
                                  ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                              }
-                             if resize_response.dragged() || resize_response.clicked() { note_interacted_this_frame = true; }
+                             if resize_response.dragged() || resize_response.clicked() || (resize_response.hovered() && ui.input(|i| i.pointer.primary_down())) { note_interacted_this_frame = true; }
                              
                              if resize_response.drag_started() {
                                  self.drag_original_note = Some(note.clone());
@@ -960,6 +1177,7 @@ impl eframe::App for OmniApp {
                                          velocity_deviation: note.velocity_deviation,
                                          condition: note.condition,
                                      });
+                                     self.last_note_length = note.duration; // Update sticky length
                                  }
                                  self.drag_original_note = None;
                              }
@@ -970,7 +1188,7 @@ impl eframe::App for OmniApp {
                                  if body_response.hovered() {
                                      ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                                  }
-                                 if body_response.dragged() || body_response.clicked() { note_interacted_this_frame = true; }
+                                 if body_response.dragged() || body_response.clicked() || (body_response.hovered() && ui.input(|i| i.pointer.primary_down())) { note_interacted_this_frame = true; }
                                  
                                  // Selection Logic
                                  if body_response.clicked() {
@@ -1009,7 +1227,13 @@ impl eframe::App for OmniApp {
                                          // Snap Key (Integral)
                                          let new_key = (orig.key as f32 + delta_keys).clamp(0.0, 127.0) as u8;
                                          if new_key != note.key {
-                                             note.key = new_key;
+                                             let is_valid = if let Some(notes) = &valid_notes {
+                                                 notes.contains(&(new_key as i16))
+                                             } else { true };
+                                             
+                                             if is_valid {
+                                                 note.key = new_key;
+                                             }
                                          }
                                      }
                                  }
@@ -1040,11 +1264,6 @@ impl eframe::App for OmniApp {
                                      }
                                      self.drag_original_note = None;
                                  }
-                                 
-                                 if body_response.secondary_clicked() {
-                                     // Delete
-                                     note_actions.push((2, idx, note.clone()));
-                                 }
                              }
                         }
                     }
@@ -1052,6 +1271,8 @@ impl eframe::App for OmniApp {
                     // Apply One-Shot Actions (Deletes)
                     // We handle Move/Resize in-place above for immediate feedback, 
                     // but Deletes change the Vec structure so must be deferred.
+                    // Sort descending to safe remove
+                    note_actions.sort_by(|a, b| b.1.cmp(&a.1));
                     for (action, idx, note) in note_actions {
                         if action == 2 {
                              clip.notes.remove(idx);
@@ -1074,12 +1295,14 @@ impl eframe::App for OmniApp {
                         let pointer_pos = ui.input(|i| i.pointer.interact_pos());
                         if let Some(pos) = pointer_pos {
                             if piano_rect.contains(pos) {
-                                 if ui.input(|i| i.pointer.primary_clicked()) && !ui.ctx().is_using_pointer() {
-                                    // Deselect all if we click background
-                                    if !ui.input(|i| i.modifiers.shift) && !ui.input(|i| i.modifiers.ctrl) {
-                                        for note in clip.notes.iter_mut() {
-                                            note.selected = false;
-                                        }
+                                 if ui.input(|i| i.pointer.primary_down()) {
+                                    // Only deselect if clicked (fresh interaction), not painting
+                                    if ui.input(|i| i.pointer.primary_clicked()) {
+                                         if !ui.input(|i| i.modifiers.shift) && !ui.input(|i| i.modifiers.ctrl) {
+                                             for note in clip.notes.iter_mut() {
+                                                 note.selected = false;
+                                             }
+                                         }
                                     }
 
                                     let local_x = pos.x - piano_rect.left() + self.piano_roll_scroll_x;
@@ -1092,13 +1315,29 @@ impl eframe::App for OmniApp {
                                         start = (start / snap).round() * snap;
                                     }
                                     
-                                    let key_exact = 127.0 - (local_y / note_height);
+                                    // Fix Offset: Use floor() to get correct row index
+                                    let row_idx = (local_y / note_height).floor();
+                                    let key_exact = 127.0 - row_idx;
                                     let note_idx = key_exact.clamp(0.0, 127.0) as u8;
                                     
-                                    if start >= 0.0 {
-                                         clip.notes.push(omni_shared::project::Note {
+                                    let is_valid = if let Some(notes) = &valid_notes {
+                                        notes.contains(&(note_idx as i16))
+                                    } else { true };
+
+                                    // Prevent duplicate notes during painting
+                                    let already_exists = clip.notes.iter().any(|n| 
+                                        (n.start - start).abs() < 0.001 && n.key == note_idx
+                                    );
+
+                                    if start >= 0.0 && is_valid && !already_exists {
+                                            // Deselect others if painting (prevents selection accumulation)
+                                            if !ui.input(|i| i.modifiers.shift) && !ui.input(|i| i.modifiers.ctrl) {
+                                                for n in clip.notes.iter_mut() { n.selected = false; }
+                                            }
+                                            let duration = if self.last_note_length < 0.01 { 0.25 } else { self.last_note_length };
+                                            clip.notes.push(omni_shared::project::Note {
                                              start,
-                                             duration: 0.25, 
+                                             duration, 
                                              key: note_idx,
                                              velocity: 100,
                                              probability: 1.0,
@@ -1110,7 +1349,7 @@ impl eframe::App for OmniApp {
                                              track_index: self.selected_track,
                                              clip_index: self.selected_clip,
                                              start,
-                                             duration: 0.25,
+                                             duration,
                                              note: note_idx,
                                              probability: 1.0,
                                              velocity_deviation: 0,
@@ -1154,89 +1393,7 @@ impl eframe::App for OmniApp {
                         }
                     }
                     
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.heading("Note Expressions (Selected)");
-                    
-                    // Collect selected indices
-                    let selected_indices: Vec<usize> = clip.notes.iter().enumerate()
-                        .filter(|(_, n)| n.selected).map(|(i, _)| i).collect();
-                    
-                    if !selected_indices.is_empty() {
-                        // Use first selected note for display values
-                        let first_idx = selected_indices[0];
-                        // Create a temp copy to bind UI to
-                        let mut temp_note = clip.notes[first_idx].clone();
-                        let mut changed = false;
-                        
-                        ui.horizontal(|ui| {
-                            // Probability
-                            ui.label("Chance:");
-                            if ui.add(egui::Slider::new(&mut temp_note.probability, 0.0..=1.0).text("%")).changed() { changed = true; }
-                            
-                            ui.separator();
-                            
-                            // Velocity Deviation
-                            ui.label("Vel Dev:");
-                            if ui.add(egui::Slider::new(&mut temp_note.velocity_deviation, -64..=64).text("+/-")).changed() { changed = true; }
-
-                            ui.separator();
-
-                            // Condition
-                            ui.label("Condition:");
-                            egui::ComboBox::from_id_salt("note_cond")
-                                .selected_text(format!("{:?}", temp_note.condition))
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Always, "Always").changed() { changed = true; }
-                                    if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::PreviousNotePlayed, "Prev Played").changed() { changed = true; }
-                                    if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::PreviousNoteSilenced, "Prev Silenced").changed() { changed = true; }
-                                    ui.separator();
-                                    if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Iteration { expected: 1, cycle: 2 }, "1 / 2").changed() { changed = true; }
-                                    if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Iteration { expected: 2, cycle: 2 }, "2 / 2").changed() { changed = true; }
-                                    if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Iteration { expected: 1, cycle: 4 }, "1 / 4").changed() { changed = true; }
-                                    if ui.selectable_value(&mut temp_note.condition, omni_shared::project::NoteCondition::Iteration { expected: 4, cycle: 4 }, "4 / 4").changed() { changed = true; }
-                                });
-                            if temp_note.condition != clip.notes[first_idx].condition { changed = true; }
-                        });
-                        
-                        if changed {
-                            // Apply to ALL selected notes
-                            for idx in selected_indices {
-                                if let Some(note) = clip.notes.get_mut(idx) {
-                                    // 1. Remove Old
-                                     let _ = self.messenger.send(EngineCommand::ToggleNote {
-                                        track_index: self.selected_track,
-                                        clip_index: self.selected_clip,
-                                        start: note.start,
-                                        duration: note.duration,
-                                        note: note.key,
-                                        probability: 1.0,
-                                        velocity_deviation: 0,
-                                        condition: omni_shared::project::NoteCondition::Always,
-                                    });
-                                    
-                                    // Update fields
-                                    note.probability = temp_note.probability;
-                                    note.velocity_deviation = temp_note.velocity_deviation;
-                                    note.condition = temp_note.condition;
-
-                                    // 2. Add New
-                                     let _ = self.messenger.send(EngineCommand::ToggleNote {
-                                        track_index: self.selected_track,
-                                        clip_index: self.selected_clip,
-                                        start: note.start,
-                                        duration: note.duration,
-                                        note: note.key,
-                                        probability: note.probability,
-                                        velocity_deviation: note.velocity_deviation,
-                                        condition: note.condition,
-                                    });
-                                }
-                            }
-                        }
-                    } else {
-                        ui.label("No note selected.");
-                    }
+                     // Expressions moved to Docked Panel
 
 
                 } // End Piano Roll Mode

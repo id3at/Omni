@@ -14,6 +14,7 @@ use clap_sys::events::{
 use clap_sys::ext::params::{clap_plugin_params, CLAP_EXT_PARAMS, clap_param_info};
 use clap_sys::ext::gui::{clap_plugin_gui, CLAP_EXT_GUI, clap_window, CLAP_WINDOW_API_X11};
 use clap_sys::ext::timer_support::{clap_plugin_timer_support, clap_host_timer_support, CLAP_EXT_TIMER_SUPPORT};
+use clap_sys::ext::note_name::{clap_plugin_note_name, clap_note_name, CLAP_EXT_NOTE_NAME};
 use winit::window::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -53,6 +54,9 @@ pub struct ClapPlugin {
     _host_box: Box<clap_host>, 
     pub params: *const clap_plugin_params,
     pending_params: Arc<Mutex<Vec<(u32, f64)>>>,
+
+    // Plugin metadata
+    pub clap_id: String,
 
     // Interior Mutability for Audio Thread exclusive access
     // This Mutex is ONLY locked by process_audio, so it is uncontended by GUI
@@ -261,6 +265,7 @@ impl ClapPlugin {
             _host_box: host,
             params,
             pending_params: Arc::new(Mutex::new(Vec::new())),
+            clap_id: CStr::from_ptr(plugin_id).to_string_lossy().into_owned(),
             audio_buffers: Mutex::new(AudioBuffers {
                 left: vec![0.0; max_buf],
                 right: vec![0.0; max_buf],
@@ -529,5 +534,45 @@ impl ClapPlugin {
                 }
             }
         }
+    }
+
+    /// Query note names from the plugin using CLAP_EXT_NOTE_NAME extension
+    pub unsafe fn get_note_names(&self) -> Vec<omni_shared::NoteNameInfo> {
+        let note_name_ext = if let Some(get_ext) = (*self.plugin).get_extension {
+            get_ext(self.plugin, CLAP_EXT_NOTE_NAME.as_ptr() as *const i8) as *const clap_plugin_note_name
+        } else {
+            return Vec::new();
+        };
+
+        if note_name_ext.is_null() {
+            eprintln!("[CLAP] Plugin does not support note_name extension");
+            return Vec::new();
+        }
+
+        let mut result = Vec::new();
+
+        if let Some(count_fn) = (*note_name_ext).count {
+            let count = count_fn(self.plugin);
+            eprintln!("[CLAP] note_name extension: {} names available", count);
+
+            if let Some(get_fn) = (*note_name_ext).get {
+                for i in 0..count {
+                    let mut info: clap_note_name = std::mem::zeroed();
+                    if get_fn(self.plugin, i, &mut info) {
+                        let name = std::ffi::CStr::from_ptr(info.name.as_ptr())
+                            .to_string_lossy()
+                            .into_owned();
+                        result.push(omni_shared::NoteNameInfo {
+                            key: info.key,
+                            channel: info.channel,
+                            name,
+                        });
+                    }
+                }
+            }
+        }
+
+        eprintln!("[CLAP] Retrieved {} note names", result.len());
+        result
     }
 }

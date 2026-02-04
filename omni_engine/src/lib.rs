@@ -67,6 +67,8 @@ pub enum EngineCommand {
         use_sequencer: bool,
         data: omni_shared::project::StepSequencerData,
     },
+    // Returns (clap_id, note_names)
+    GetNoteNames { track_index: usize, response_tx: Sender<(String, Vec<omni_shared::NoteNameInfo>)> },
 }
 
 impl AudioEngine {
@@ -335,6 +337,14 @@ impl AudioEngine {
                                     if clip_index < project.tracks[track_index].clips.len() {
                                         project.tracks[track_index].clips[clip_index].use_sequencer = use_sequencer;
                                         project.tracks[track_index].clips[clip_index].step_sequencer = data;
+                                    }
+                                }
+                            }
+                            EngineCommand::GetNoteNames { track_index, response_tx } => {
+                                if let Some(&node_idx) = track_node_indices.get(track_index) {
+                                    if let Some(node) = graph.node_mut(node_idx) {
+                                        let names = node.get_note_names();
+                                        let _ = response_tx.send(names);
                                     }
                                 }
                             }
