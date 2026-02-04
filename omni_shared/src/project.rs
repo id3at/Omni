@@ -40,12 +40,88 @@ pub struct Note {
 
 fn default_probability() -> f64 { 1.0 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum SequencerDirection {
+    Forward,
+    Backward,
+    Random,
+    Each2nd,
+    Each3rd,
+    Each4th,
+}
+
+impl Default for SequencerDirection {
+    fn default() -> Self {
+        Self::Forward
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequencerLane<T> {
+    pub steps: Vec<T>,
+    pub loop_start: u32,
+    pub loop_end: u32,    // Exclusive? or Inclusive? Let's say length-based or index. Thesys uses "Loop Bar". Let's use start/length mostly? Or start/end indices. Thesys Docs: "beginning and start steps". Let's use indices.
+    pub direction: SequencerDirection,
+    pub active: bool, // For Modulation tracks
+}
+
+impl<T: Default + Clone> SequencerLane<T> {
+    pub fn new(size: usize, default_val: T) -> Self {
+        Self {
+            steps: vec![default_val; size],
+            loop_start: 0,
+            loop_end: size as u32,
+            direction: SequencerDirection::default(),
+            active: true,
+        }
+    }
+}
+
+impl<T: Default + Clone> Default for SequencerLane<T> {
+    fn default() -> Self {
+        Self {
+            steps: Vec::new(),
+            loop_start: 0,
+            loop_end: 16,
+            direction: SequencerDirection::default(),
+            active: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepSequencerData {
+    pub pitch: SequencerLane<u8>,       // 0-127 (or 0-24 relative?) Thesys is +/- 12 steps or relative. Let's stick to absolute MIDI notes for now or relative? Plan said "Pitch (0-127)".
+    pub velocity: SequencerLane<u8>,    // 0-127
+    pub gate: SequencerLane<f32>,       // 0.0 - 1.0+ (Gate Time)
+    pub performance: SequencerLane<u8>, // Enum? For now u8 index.
+    pub modulation: SequencerLane<u8>,  // 0-127
+}
+
+impl Default for StepSequencerData {
+    fn default() -> Self {
+        Self {
+            pitch: SequencerLane::new(16, 60), // C3
+            velocity: SequencerLane::new(16, 100),
+            gate: SequencerLane::new(16, 0.5),
+            performance: SequencerLane::new(16, 0),
+            modulation: SequencerLane::new(16, 0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Clip {
     pub name: String,
     pub notes: Vec<Note>, 
-    pub length: f64,     // Length in beats (was u32 steps)
+    pub length: f64,     // Length in beats
     pub color: [u8; 3],
+    
+    #[serde(default)]
+    pub use_sequencer: bool,
+    
+    #[serde(default)]
+    pub step_sequencer: StepSequencerData,
 }
 
 impl Default for Clip {
@@ -55,6 +131,8 @@ impl Default for Clip {
             notes: Vec::new(),
             length: 4.0, // Default 1 bar (4 beats)
             color: [100, 100, 100],
+            use_sequencer: false,
+            step_sequencer: StepSequencerData::default(),
         }
     }
 }

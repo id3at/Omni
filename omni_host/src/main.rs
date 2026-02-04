@@ -2,13 +2,17 @@ use anyhow::Result;
 use omni_engine::{AudioEngine, EngineCommand};
 use crossbeam_channel::{unbounded, Sender, Receiver};
 use eframe::egui;
-use omni_shared::project::{Project};
+use omni_shared::project::{Project, StepSequencerData};
+mod sequencer_ui;
+use sequencer_ui::SequencerUI;
 
 #[derive(Clone)]
 pub struct ClipData {
     pub notes: Vec<omni_shared::project::Note>, 
     pub color: egui::Color32,
     pub length: f64,
+    pub use_sequencer: bool,
+    pub step_sequencer: StepSequencerData,
 }
 
 impl Default for ClipData {
@@ -17,6 +21,8 @@ impl Default for ClipData {
             notes: Vec::new(),
             color: egui::Color32::from_gray(60),
             length: 4.0,
+            use_sequencer: false,
+            step_sequencer: StepSequencerData::default(),
         }
     }
 }
@@ -109,6 +115,7 @@ pub struct OmniApp {
     
     // Playback State
     // Playback State
+    selected_sequencer_lane: usize, // 0=Pitch, 1=Vel, etc.
 
     
     // Interaction State
@@ -158,7 +165,7 @@ impl OmniApp {
             piano_roll_scroll_y: 60.0 * 20.0, // Center roughly on C3
             piano_roll_zoom_x: 50.0, // Pixels per beat
             piano_roll_zoom_y: 20.0, // Pixels per note
-            
+            selected_sequencer_lane: 0,
             
             drag_original_note: None,
             drag_accumulated_delta: egui::Vec2::ZERO,
@@ -607,7 +614,46 @@ impl eframe::App for OmniApp {
                     let clip = &mut self.tracks[self.selected_track].clips[self.selected_clip];
                     
                     ui.heading(format!("Piano Roll: {} - Clip {}", track_name, self.selected_clip));
-                    ui.label("Controls: [LMB] Add Note | [RMB] Delete | [MMB/Mwheel] Pan | [Ctrl+Wheel] Zoom");
+                    
+                    // TOGGLE MODE
+                    ui.horizontal(|ui| {
+                        let mode_text = if clip.use_sequencer { "STEP SEQUENCER" } else { "PIANO ROLL" };
+                        let mode_color = if clip.use_sequencer { egui::Color32::YELLOW } else { egui::Color32::LIGHT_BLUE };
+                        if ui.add(egui::Button::new(egui::RichText::new(mode_text).strong()).fill(mode_color)).clicked() {
+                            clip.use_sequencer = !clip.use_sequencer;
+                            if clip.use_sequencer {
+                                self.selected_sequencer_lane = 1; // Default to VELOCITY as requested
+                            }
+                            let _ = self.messenger.send(EngineCommand::UpdateClipSequencer {
+                                track_index: self.selected_track,
+                                clip_index: self.selected_clip,
+                                use_sequencer: clip.use_sequencer,
+                                data: clip.step_sequencer.clone(),
+                            });
+                        }
+                    });
+
+                    if clip.use_sequencer {
+                        
+                        let current_beat = if let Some(engine) = &self.engine {
+                             if engine.is_playing() {
+                                 let sample_rate = 44100.0; 
+                                 let bpm = 120.0; 
+                                 let samples_per_beat = (sample_rate * 60.0) / bpm;
+                                 Some(self.global_sample_pos as f64 / samples_per_beat)
+                             } else { None }
+                        } else { None };
+
+                        if SequencerUI::show(ui, &mut clip.step_sequencer, &mut self.selected_sequencer_lane, current_beat) {
+                             let _ = self.messenger.send(EngineCommand::UpdateClipSequencer {
+                                track_index: self.selected_track,
+                                clip_index: self.selected_clip,
+                                use_sequencer: clip.use_sequencer,
+                                data: clip.step_sequencer.clone(),
+                            });
+                        }
+                    } else {
+                        ui.label("Controls: [LMB] Add Note | [RMB] Delete | [MMB/Mwheel] Pan | [Ctrl+Wheel] Zoom");
 
                     // 1. Layout: Vertical Split (Piano Roll vs Note Expressions)
                     // We render them sequentially to avoid jumping.
@@ -1149,13 +1195,12 @@ impl eframe::App for OmniApp {
                     } else {
                         ui.label("No note selected.");
                     }
-                    }
 
 
-                    }
+                } // End Piano Roll Mode
 
-
-
+                } // End if selected_clip
+            } // End if selected_track
             if self.engine.is_none() && self.is_playing {
                 ui.colored_label(egui::Color32::RED, "Engine failed to initialize");
             }

@@ -6,7 +6,7 @@ pub mod sequencer;
 use crate::graph::AudioGraph;
 use crate::nodes::{GainNode}; // Added GainNode
 use crate::plugin_node::PluginNode;
-use crate::sequencer::Sequencer;
+use crate::sequencer::{Sequencer, StepGenerator};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender};
 use omni_shared::project::{Project, Track};
@@ -60,6 +60,12 @@ pub enum EngineCommand {
     SetClipLength { track_index: usize, clip_index: usize, length: f64 },
     AddTrack { plugin_path: Option<String> }, // Added AddTrack command
     LoadPluginToTrack { track_index: usize, plugin_path: String }, // Added LoadPlugin command
+    UpdateClipSequencer {
+        track_index: usize,
+        clip_index: usize,
+        use_sequencer: bool,
+        data: omni_shared::project::StepSequencerData,
+    },
 }
 
 impl AudioEngine {
@@ -323,6 +329,14 @@ impl AudioEngine {
                                      }
                                  }
                             }
+                            EngineCommand::UpdateClipSequencer { track_index, clip_index, use_sequencer, data } => {
+                                if track_index < project.tracks.len() {
+                                    if clip_index < project.tracks[track_index].clips.len() {
+                                        project.tracks[track_index].clips[clip_index].use_sequencer = use_sequencer;
+                                        project.tracks[track_index].clips[clip_index].step_sequencer = data;
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -409,10 +423,75 @@ impl AudioEngine {
                                  if let Some(clip_idx) = track.active_clip_index {
                                      if let Some(clip) = track.clips.get(clip_idx) {
                                          // Check notes in this clip
-                                         // Ideally use a spatial map, but for <1000 notes linear scan is fine
-                                         let loop_len = clip.length; 
-                                         
-                                         for note in &clip.notes {
+                                         if clip.use_sequencer {
+                                            // --- THESYS STEP SEQUENCER LOGIC ---
+                                            let seq = &clip.step_sequencer;
+                                            
+                                            // Determine which global steps we are covering in this buffer
+                                            // 16th notes (0.25 beats)
+                                            let step_dur_beats = 0.25;
+                                            // use ceil to ensure we catch the start of step
+                                            let start_step_idx = (start_beat / step_dur_beats).ceil() as u64;
+                                            let end_step_idx = (end_beat / step_dur_beats).ceil() as u64;
+                                            
+                                            for global_step_counter in start_step_idx..end_step_idx {
+                                                // Calculate offset in samples for this step trigger
+                                                let step_beat_time = global_step_counter as f64 * step_dur_beats;
+                                                let offset_beats = step_beat_time - start_beat;
+                                                // clamp just in case
+                                                let offset_samples = ((offset_beats * samples_per_beat as f64) as i64).max(0) as u32;
+                                                
+                                                if offset_samples >= frames as u32 { continue; }
+
+                                                // 1. Get Pitch
+                                                let pitch_idx = StepGenerator::get_step_index(
+                                                    global_step_counter, 
+                                                    seq.pitch.direction, 
+                                                    seq.pitch.loop_start, 
+                                                    seq.pitch.loop_end
+                                                );
+                                                let pitch_step = seq.pitch.steps.get(pitch_idx).copied().unwrap_or(60);
+                                                
+                                                // 2. Get Velocity
+                                                let vel_idx = StepGenerator::get_step_index(
+                                                    global_step_counter, 
+                                                    seq.velocity.direction, 
+                                                    seq.velocity.loop_start, 
+                                                    seq.velocity.loop_end
+                                                );
+                                                let velocity = seq.velocity.steps.get(vel_idx).copied().unwrap_or(100);
+                                                
+                                                if velocity == 0 { continue; } // Muted step
+                                                
+                                                // 3. Get Gate
+                                                let gate_idx = StepGenerator::get_step_index(
+                                                    global_step_counter, 
+                                                    seq.gate.direction, 
+                                                    seq.gate.loop_start, 
+                                                    seq.gate.loop_end
+                                                );
+                                                let gate_len = seq.gate.steps.get(gate_idx).copied().unwrap_or(0.5);
+                                                
+                                                // Trigger
+                                                audio_buffers.track_events[t_idx].push(MidiNoteEvent {
+                                                    note: pitch_step,
+                                                    velocity,
+                                                    channel: 0,
+                                                    sample_offset: offset_samples,
+                                                });
+                                                
+                                                if t_idx < active_notes.len() {
+                                                     let dur_beats = gate_len as f64 * step_dur_beats;
+                                                     let dur_samples = (dur_beats * samples_per_beat as f64) as u64;
+                                                     active_notes[t_idx].push((pitch_step, dur_samples));
+                                                }
+                                            }
+                                         } else {
+                                             // --- LEGACY PIANO ROLL LOGIC ---
+                                             // Ideally use a spatial map, but for <1000 notes linear scan is fine
+                                             let loop_len = clip.length; 
+                                             
+                                          for note in &clip.notes {
                                              // Handle looping: Map note start to current window
                                              // Simple approach: Check if note falls in [start_beat, end_beat) modulo loop
                                              
@@ -477,6 +556,7 @@ impl AudioEngine {
                                                  }
                                              }
                                          }
+                                          } // End Else added by script
                                      }
                                  }
                              }
