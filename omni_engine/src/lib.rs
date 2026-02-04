@@ -88,7 +88,7 @@ impl AudioEngine {
         
         // Create StreamConfig and override buffer size
         let mut stream_config: cpal::StreamConfig = config.into();
-        stream_config.buffer_size = cpal::BufferSize::Fixed(1024);
+        stream_config.buffer_size = cpal::BufferSize::Fixed(2048);
         eprintln!("[AudioEngine] Using Config: {:?}", stream_config);
 
         // Shared Atomic State
@@ -108,7 +108,13 @@ impl AudioEngine {
         let mut sequencer = Sequencer::new(120.0);
         let mut track_node_indices = Vec::new();
 
-        let err_fn = |err| eprintln!("an error occurred on stream: {}", err);
+        let err_fn = |err: cpal::StreamError| {
+            let s = err.to_string();
+            // Suppress common buffer under/overrun messages to avoid console spam
+            if !s.contains("underrun") && !s.contains("overrun") {
+                eprintln!("an error occurred on stream: {}", s);
+            }
+        };
         
         // Track active notes for Note Offs: TrackIndex -> Vec<(Note, RemainingSamples)>
         let mut active_notes: Vec<Vec<(u8, u64)>> = vec![vec![]; 32]; // Increase capacity
