@@ -24,6 +24,7 @@ pub struct AudioEngine {
     sample_position: Arc<AtomicU64>,
     _sequencer: Sequencer,
     current_step: Arc<AtomicU32>,
+    sample_rate: u32,
 }
 
 
@@ -626,6 +627,7 @@ impl AudioEngine {
             sample_position,
             _sequencer: Sequencer::new(120.0), // Placeholder
             current_step,
+            sample_rate,
         })
     }
 
@@ -641,5 +643,9 @@ impl AudioEngine {
 
     pub fn get_current_step(&self) -> u32 {
         self.current_step.load(Ordering::Relaxed)
+    }
+
+    pub fn get_sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 }

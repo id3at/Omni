@@ -488,31 +488,73 @@ impl eframe::App for OmniApp {
                                 let is_active = track.active_clip == Some(clip_idx);
                                 let is_selected = self.selected_track == track_idx && self.selected_clip == clip_idx;
                                 
-                                let mut color = if is_active {
-                                    clip.color
-                                } else {
-                                    egui::Color32::from_gray(40)
-                                };
+                                // Allocate space for the clip button
+                                let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
                                 
-                                if is_selected {
-                                    color = egui::Color32::from_rgb(
-                                        color.r().saturating_add(50), 
-                                        color.g().saturating_add(50), 
-                                        color.b().saturating_add(50)
-                                    );
-                                }
-
-                                let icon = if is_active { "▶" } else { "⏵" };   
-                                let btn = egui::Button::new(icon)
-                                    .fill(color)
-                                    .min_size(egui::vec2(ui.available_width(), 30.0));
-                                
-                                if ui.add(btn).clicked() {
+                                if response.clicked() {
                                     self.selected_track = track_idx;
                                     self.selected_clip = clip_idx;
                                     track.active_clip = Some(clip_idx);
                                     let _ = self.messenger.send(EngineCommand::TriggerClip { track_index: track_idx, clip_index: clip_idx });
                                 }
+
+                                // 1. Determine Base Colors
+                                let base_color = if is_active {
+                                    clip.color
+                                } else {
+                                    egui::Color32::from_gray(40)
+                                };
+                                
+                                let final_color = if is_selected {
+                                    egui::Color32::from_rgb(
+                                        base_color.r().saturating_add(50), 
+                                        base_color.g().saturating_add(50), 
+                                        base_color.b().saturating_add(50)
+                                    )
+                                } else {
+                                    base_color
+                                };
+                                
+                                let stroke_color = if is_selected { egui::Color32::YELLOW } else { egui::Color32::BLACK };
+                                let stroke_width = if is_selected { 2.0 } else { 0.0 };
+
+                                // 2. Draw Background
+                                ui.painter().rect_filled(rect, 2.0, final_color);
+                                if stroke_width > 0.0 {
+                                    ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(stroke_width, stroke_color), egui::StrokeKind::Middle);
+                                }
+
+                                // 3. Draw Playback Progress (Animation)
+                                if is_active && self.is_playing {
+                                    let sample_rate = self.engine.as_ref().map(|e| e.get_sample_rate()).unwrap_or(44100);
+                                    let samples_per_beat = (sample_rate as f64 * 60.0) / self.bpm as f64;
+                                    // Protect against div by zero or extremely short loops
+                                    let loop_len_samples = (clip.length * samples_per_beat).max(1024.0); 
+                                    
+                                    // Phase 0.0 to 1.0 within the loop
+                                    let phase = (self.global_sample_pos as f64 % loop_len_samples) / loop_len_samples;
+                                    
+                                    // Draw a semi-transparent white overlay indicating progress
+                                    let progress_width = rect.width() * phase as f32;
+                                    let progress_rect = egui::Rect::from_min_size(
+                                        rect.min, 
+                                        egui::vec2(progress_width, rect.height())
+                                    );
+                                    
+                                    // Use additive or overlay blending look
+                                    let progress_color = egui::Color32::from_rgba_premultiplied(255, 255, 255, 40); 
+                                    ui.painter().rect_filled(progress_rect, 2.0, progress_color);
+                                }
+
+                                // 4. Draw Icon
+                                let icon = if is_active { "▶" } else { "⏵" };   
+                                ui.painter().text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    icon,
+                                    egui::FontId::proportional(14.0),
+                                    egui::Color32::WHITE
+                                );
                             }
 
                             ui.add_space(10.0);
