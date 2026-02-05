@@ -58,8 +58,6 @@ pub enum EngineCommand {
     LoadProject(String),
     ResetGraph,
     StopTrack { track_index: usize },
-    RemoveTrack { track_index: usize }, // Added
-    NewProject, // Added
     OpenPluginEditor { track_index: usize },
     SetClipLength { track_index: usize, clip_index: usize, length: f64 },
     AddTrack { plugin_path: Option<String> }, // Added AddTrack command
@@ -302,76 +300,6 @@ impl AudioEngine {
                                 graph = AudioGraph::new();
                                 track_node_indices.clear();
                                 eprintln!("[Engine] Audio Graph Reset");
-                            }
-                            EngineCommand::NewProject => {
-                                // 1. Stop Playback
-                                play_flag.store(false, Ordering::Relaxed);
-                                pos_counter.store(0, Ordering::Relaxed);
-                                
-                                // 2. Reset Engine State
-                                graph = AudioGraph::new();
-                                track_node_indices.clear();
-                                project = Project::default();
-                                sequencer.reset();
-                                active_notes.iter_mut().for_each(|v| v.clear());
-                                
-                                eprintln!("[Engine] New Project Created (Engine State Reset)");
-                            }
-                            EngineCommand::RemoveTrack { track_index } => {
-                                if track_index < track_node_indices.len() {
-                                    let node_idx_to_remove = track_node_indices[track_index];
-                                    
-                                    // 1. Remove from Graph (Standard Remove - Swap Remove behavior of petgraph!)
-                                    // graph.remove_node swaps the last node into the removed node's index to preserve compact indices.
-                                    // We must update the track_node_indices for the track that owned that last node.
-                                    
-                                    // A. Identify the index of the node that will be moved (last node in graph)
-                                    // Note: buffers are resized in graph.update_schedule(), so we don't need to manually resize here.
-                                    // But we need to know WHICH track owns the last node index?
-                                    // Petgraph::remove_node returns the weight of the removed node.
-                                    // If we use graph.remove_node, we need to find the node index that was moved.
-                                    // Actually, we can implement remove logic in `track_node_indices` carefully.
-                                    
-                                    // Simplified approach if we assume graph.remove_node behavior:
-                                    // If we remove node N, and last node L was at index L_idx:
-                                    // L is moved to N_idx.
-                                    // So any track pointing to L_idx must now point to N_idx.
-                                    
-                                    // However, AudioGraph wraps petgraph. Let's assume we add a remove_node method to AudioGraph.
-                                    // Or expose graph? `graph.graph` is field.
-                                    // Wait, AudioGraph::node_mut is available. logic is inside Engine.
-                                    // We need to add remove_node to AudioGraph first? 
-                                    // Or use raw graph? AudioGraph implementation is in graph.rs, let's look.
-                                    // It has `node_mut`. It does NOT have remove_node.
-                                    // We need to add it to AudioGraph to properly clear chains etc.
-                                    
-                                    // SKIPPING DIRECT GRAPH ACCESS FOR NOW - WE EDIT LIB.RS FIRST
-                                    // We will implement `remove_node` in AudioGraph in next step.
-                                    // Call it here assuming it exists.
-                                    
-                                    if let Some(moved_node_old_idx) = graph.remove_node(node_idx_to_remove) {
-                                         // If a node was moved (swapped), we need to update the track that pointed to it.
-                                         // If None returned, it means we removed the last node (no swap needed).
-                                         
-                                         // Find track pointing to moved_node_old_idx
-                                         if let Some(t_pos) = track_node_indices.iter().position(|&idx| idx == moved_node_old_idx) {
-                                             track_node_indices[t_pos] = node_idx_to_remove; // Now points to the new location (swapped slot)
-                                         }
-                                    }
-                                    
-                                    // 2. Remove Track Metadata
-                                    if track_index < project.tracks.len() {
-                                        project.tracks.remove(track_index);
-                                    }
-                                    
-                                    // 3. Remove Node Index Mapping
-                                    track_node_indices.remove(track_index);
-                                    
-                                    // 4. Clean up active notes
-                                    active_notes.remove(track_index);
-                                    
-                                    eprintln!("[Engine] Removed Track {}", track_index);
-                                }
                             }
                             EngineCommand::AddTrack { plugin_path } => {
                                 let node: Box<dyn AudioNode> = if let Some(ref path) = plugin_path {

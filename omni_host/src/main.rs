@@ -133,6 +133,9 @@ pub struct OmniApp {
     is_learning: bool,
     last_touched_generation: u32,
     pending_last_touched_rx: Option<Receiver<Option<(u32, f32, u32)>>>,
+    
+    // Deferred Actions (RefCell to mutate from inside UI closures)
+    deferred_track_remove: std::cell::RefCell<Option<usize>>,
 }
 
 impl OmniApp {
@@ -186,6 +189,7 @@ impl OmniApp {
             is_learning: false,
             last_touched_generation: 0,
             pending_last_touched_rx: None,
+            deferred_track_remove: std::cell::RefCell::new(None),
         }
     }
 
@@ -248,6 +252,18 @@ impl OmniApp {
 
 impl eframe::App for OmniApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // --- DEFERRED ACTIONS ---
+        if let Some(track_idx) = self.deferred_track_remove.borrow_mut().take() {
+             if track_idx < self.tracks.len() {
+                 let _ = self.messenger.send(EngineCommand::RemoveTrack { track_index: track_idx });
+                 self.tracks.remove(track_idx);
+                 if self.selected_track >= self.tracks.len() && !self.tracks.is_empty() {
+                     self.selected_track = self.tracks.len() - 1;
+                 }
+                 eprintln!("[UI] Deleted Track {}", track_idx);
+             }
+        }
+
         let current_step = if let Some(ref engine) = self.engine {
             if self.is_playing {
                 ctx.request_repaint(); // Keep UI responsive for playhead
@@ -524,6 +540,20 @@ impl eframe::App for OmniApp {
                         }
                     }
                 }
+
+                if ui.button("📄 NEW PROJECT").clicked() {
+                    let _ = self.messenger.send(EngineCommand::NewProject);
+                    
+                    // Reset Local State
+                    self.tracks.clear();
+                    self.bpm = 120.0;
+                    let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
+                    self.selected_track = 0;
+                    self.selected_clip = 0;
+                    self.param_states.clear();
+                    
+                    eprintln!("[UI] New Project Created");
+                }
             });
 
             ui.add_space(20.0);
@@ -789,9 +819,9 @@ impl eframe::App for OmniApp {
                             
                             // 2. Track Mixer Strip (Compact)
                             
-                            // A. Header Row: Load | GUI | Mute | Stop
+                            // A. Header Row: Load | GUI | Mute | Stop | Delete
                             ui.horizontal(|ui| {
-                                let btn_w = (ui.available_width() - 12.0) / 4.0; // 4 buttons, 3 spaces approx
+                                let btn_w = (ui.available_width() - 16.0) / 5.0; // 5 buttons now
                                 let btn_size = egui::vec2(btn_w, 20.0);
                                 
                                 // Load
@@ -826,6 +856,11 @@ impl eframe::App for OmniApp {
                                 if ui.add_sized(btn_size, egui::Button::new("■")).clicked() {
                                     track.active_clip = None;
                                     let _ = self.messenger.send(EngineCommand::StopTrack { track_index: track_idx });
+                                }
+
+                                // Remove
+                                if ui.add_sized(btn_size, egui::Button::new("🗑")).clicked() {
+                                    *self.deferred_track_remove.borrow_mut() = Some(track_idx);
                                 }
                             });
 

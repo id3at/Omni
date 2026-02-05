@@ -101,6 +101,28 @@ impl AudioGraph {
         self.graph.clear();
         self.chains.clear();
     }
+
+    /// Removes a node from the graph.
+    /// Returns:
+    /// - `Some(NodeIndex)`: The old index of the node that was swapped into the removed node's place (if any).
+    /// - `None`: If the removed node was the last one (no swap occurred), or if the node didn't exist.
+    pub fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeIndex> {
+        let last_idx_before_remove = self.graph.node_count().checked_sub(1).map(NodeIndex::new);
+        
+        if self.graph.remove_node(idx).is_some() {
+            // Invalidate chains
+            self.chains.clear();
+            
+            // Check if a swap occurred
+            if let Some(last_idx) = last_idx_before_remove {
+                if idx.index() < last_idx.index() {
+                    // A swap occurred: The node at `last_idx` was moved to `idx`.
+                    return Some(last_idx);
+                }
+            }
+        }
+        None
+    }
 }
 
 // struct GraphWrapper(*mut DiGraph<Box<dyn AudioNode>, ()>);
