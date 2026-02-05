@@ -2519,6 +2519,7 @@ name = "omni_shared"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "fastrand",
  "raw-window-handle",
  "ringbuf",
  "serde",

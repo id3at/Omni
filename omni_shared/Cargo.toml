@@ -13,3 +13,4 @@ thiserror = "1.0"
 shared_memory = "0.12" 
 # Ringbuf for lock-free communication within shared memory
 ringbuf = "0.3" 
+fastrand = "2.0" 

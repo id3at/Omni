@@ -75,6 +75,18 @@ impl<T: Default + Clone> SequencerLane<T> {
             active: true,
         }
     }
+
+    pub fn reset(&mut self, default_val: T) {
+        // Reset steps to default value
+        for step in &mut self.steps {
+            *step = default_val.clone();
+        }
+        // Reset loop points
+        self.loop_start = 0;
+        self.loop_end = self.steps.len() as u32;
+        // Reset direction
+        self.direction = SequencerDirection::default();
+    }
 }
 
 impl<T: Default + Clone> Default for SequencerLane<T> {
@@ -129,6 +141,17 @@ impl SequencerLane<u8> {
             self.steps[i] = val.clamp(min as i32, max as i32) as u8;
         }
     }
+
+    pub fn randomize_values(&mut self, min: u8, max: u8) {
+        let start = self.loop_start as usize;
+        let end = self.loop_end as usize;
+        
+        if end > self.steps.len() { return; }
+        
+        for i in start..end {
+            self.steps[i] = fastrand::u8(min..=max);
+        }
+    }
 }
 
 impl SequencerLane<f32> {
@@ -143,6 +166,19 @@ impl SequencerLane<f32> {
             self.steps[i] = val.clamp(min, max);
         }
     }
+
+    pub fn randomize_values(&mut self, min: f32, max: f32) {
+        let start = self.loop_start as usize;
+        let end = self.loop_end as usize;
+        
+        if end > self.steps.len() { return; }
+        
+        for i in start..end {
+            // fastrand f32 is 0..1
+            let r = fastrand::f32(); 
+            self.steps[i] = min + r * (max - min);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +191,34 @@ pub struct StepSequencerData {
     
     #[serde(default)]
     pub muted: Vec<bool>,               // Shared mute state
+}
+
+impl StepSequencerData {
+    pub fn reset_all(&mut self) {
+        self.pitch.reset(60);
+        self.velocity.reset(100);
+        self.gate.reset(0.5);
+        self.performance.reset(0);
+        self.modulation.reset(0);
+        
+        // Reset mutes
+        for m in &mut self.muted {
+            *m = false;
+        }
+    }
+
+    pub fn randomize_all(&mut self) {
+        // Pitch: 0-127
+        self.pitch.randomize_values(0, 127);
+        // Velocity: 0-127
+        self.velocity.randomize_values(0, 127);
+        // Gate: 0.0-1.0
+        self.gate.randomize_values(0.0, 1.0);
+        // Performance: 0-127
+        self.performance.randomize_values(0, 127);
+        // Modulation: 0-127
+        self.modulation.randomize_values(0, 127);
+    }
 }
 
 impl Default for StepSequencerData {

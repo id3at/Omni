@@ -12,13 +12,24 @@ impl SequencerUI {
     ) -> bool {
         let mut changed = false;
         ui.vertical(|ui| {
-            // Header: Lane Selector
+            // Header: Lane Selector and Global Controls
             ui.horizontal(|ui| {
                 ui.selectable_value(selected_lane, 0, "Pitch");
                 ui.selectable_value(selected_lane, 1, "Velocity");
                 ui.selectable_value(selected_lane, 2, "Gate");
                 ui.selectable_value(selected_lane, 3, "Performance");
                 ui.selectable_value(selected_lane, 4, "Modulation");
+                
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("🎲").on_hover_text("Randomize All").clicked() {
+                        data.randomize_all();
+                        changed = true;
+                    }
+                    if ui.button("x").on_hover_text("Reset All").clicked() {
+                        data.reset_all();
+                        changed = true;
+                    }
+                });
             });
             
             ui.separator();
@@ -111,6 +122,19 @@ impl SequencerUI {
             if ui.button("^").clicked() {
                 let delta = if is_pitch { 1 } else { 5 };
                 lane.shift_values(delta, *range.start(), *range.end());
+                changed = true;
+            }
+            
+            ui.separator();
+            
+            // Individual Reset/Random
+             if ui.button("x").on_hover_text("Reset Lane").clicked() {
+                let default_val = if is_pitch { 60 } else { 100 };
+                lane.reset(default_val);
+                changed = true;
+            }
+            if ui.button("🎲").on_hover_text("Randomize Lane").clicked() {
+                lane.randomize_values(*range.start(), *range.end());
                 changed = true;
             }
         });
@@ -291,6 +315,18 @@ impl SequencerUI {
             }
             if ui.button("^").clicked() {
                 lane.shift_values(0.05, *range.start(), *range.end());
+                changed = true;
+            }
+
+            ui.separator();
+            
+            // Individual Reset/Random
+             if ui.button("x").on_hover_text("Reset Lane").clicked() {
+                lane.reset(0.5); // Default gate
+                changed = true;
+            }
+            if ui.button("🎲").on_hover_text("Randomize Lane").clicked() {
+                lane.randomize_values(*range.start(), *range.end());
                 changed = true;
             }
         });
