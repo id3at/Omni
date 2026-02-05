@@ -190,7 +190,7 @@ impl Drop for PluginNode {
 }
 
 impl AudioNode for PluginNode {
-    fn process(&mut self, output: &mut [f32], _sample_rate: f32, midi_events: &[omni_shared::MidiNoteEvent]) {
+    fn process(&mut self, output: &mut [f32], _sample_rate: f32, midi_events: &[omni_shared::MidiNoteEvent], param_events: &[omni_shared::ParameterEvent]) {
         // Resurrection check
         let _ = self.check_resurrection();
 
@@ -227,6 +227,16 @@ impl AudioNode for PluginNode {
                 std::ptr::copy_nonoverlapping(midi_events.as_ptr(), midi_ptr, events_to_write);
             }
             header.midi_event_count = events_to_write as u32;
+            
+            // NEW: Write Parameter Events
+            let param_offset_bytes = midi_offset_bytes + (omni_shared::MAX_MIDI_EVENTS * std::mem::size_of::<omni_shared::MidiNoteEvent>());
+            header.param_event_offset = param_offset_bytes as u32;
+            header.param_event_count = param_events.len().min(omni_shared::MAX_PARAM_EVENTS) as u32;
+
+            if header.param_event_count > 0 {
+                let param_ptr = (ptr as *mut u8).add(param_offset_bytes) as *mut omni_shared::ParameterEvent;
+                std::ptr::copy_nonoverlapping(param_events.as_ptr(), param_ptr, header.param_event_count as usize);
+            }
             
             // 3. Signal Process
             // std::sync::atomic::fence(Ordering::Release); // Ensure data is visible?
@@ -301,6 +311,17 @@ impl AudioNode for PluginNode {
             }
         }
     }
+
+    fn get_last_touched(&self) -> (u32, f32, u32) {
+        unsafe {
+            let ptr = self.shmem.as_ptr();
+            let header = &*(ptr as *const OmniShmemHeader);
+            let p = std::ptr::read_volatile(&header.last_touched_param);
+            let v = std::ptr::read_volatile(&header.last_touched_value);
+            let g = std::ptr::read_volatile(&header.touch_generation);
+            (p, v, g)
+        }
+    }
 }
 
 impl PluginNode {
@@ -345,5 +366,15 @@ impl PluginNode {
         }
 
         Err(anyhow::anyhow!("Failed to get note names"))
+    }
+    pub fn get_last_touched(&self) -> (u32, f32, u32) {
+        unsafe {
+            let ptr = self.shmem.as_ptr();
+            let header = &*(ptr as *const OmniShmemHeader);
+            let p = std::ptr::read_volatile(&header.last_touched_param);
+            let v = std::ptr::read_volatile(&header.last_touched_value);
+            let g = std::ptr::read_volatile(&header.touch_generation);
+            (p, v, g)
+        }
     }
 }

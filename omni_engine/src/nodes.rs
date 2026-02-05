@@ -6,7 +6,8 @@ pub trait AudioNode: Send + Sync {
     /// inputs: vector of input buffers (summed before this call ideally, or handled inside).
     /// output: buffer to write to.
     /// midi_events: slice of MIDI events for this block.
-    fn process(&mut self, output: &mut [f32], sample_rate: f32, midi_events: &[MidiNoteEvent]);
+    /// param_events: slice of Parameter events for this block.
+    fn process(&mut self, output: &mut [f32], sample_rate: f32, midi_events: &[MidiNoteEvent], param_events: &[omni_shared::ParameterEvent]);
     
     /// Handle parameters (simplified)
     fn set_param(&mut self, _id: u32, _value: f32) {}
@@ -23,6 +24,10 @@ pub trait AudioNode: Send + Sync {
     /// Get note names from plugin (CLAP note_name extension)
     /// Returns: (clap_id, note_names) - clap_id used for fallback mappings
     fn get_note_names(&mut self) -> (String, Vec<omni_shared::NoteNameInfo>) { (String::new(), Vec::new()) }
+
+    /// Get last touched parameter (for learning)
+    /// Returns: (param_id, value, generation)
+    fn get_last_touched(&self) -> (u32, f32, u32) { (0, 0.0, 0) }
 }
 
 pub struct SineNode {
@@ -37,7 +42,7 @@ impl SineNode {
 }
 
 impl AudioNode for SineNode {
-    fn process(&mut self, output: &mut [f32], sample_rate: f32, _midi_events: &[omni_shared::MidiNoteEvent]) {
+    fn process(&mut self, output: &mut [f32], sample_rate: f32, _midi_events: &[omni_shared::MidiNoteEvent], _param_events: &[omni_shared::ParameterEvent]) {
         let frames = output.len() / 2;
         let (l, r) = output.split_at_mut(frames);
         
@@ -61,7 +66,7 @@ impl GainNode {
 }
 
 impl AudioNode for GainNode {
-    fn process(&mut self, output: &mut [f32], _sample_rate: f32, _midi_events: &[omni_shared::MidiNoteEvent]) {
+    fn process(&mut self, output: &mut [f32], _sample_rate: f32, _midi_events: &[omni_shared::MidiNoteEvent], _param_events: &[omni_shared::ParameterEvent]) {
         // Assuming the output buffer is interleaved stereo (LRLR...) for simplicity
         // If it's planar, the AudioNode trait's process signature would need to change
         // to accept multiple buffers (e.g., `&mut [&mut [f32]]`).

@@ -128,6 +128,11 @@ pub struct OmniApp {
     
     // Pending note names receiver (for async plugin query)
     pending_note_names_rx: Option<(usize, Receiver<(String, Vec<omni_shared::NoteNameInfo>)>)>,
+
+    // Learning State
+    is_learning: bool,
+    last_touched_generation: u32,
+    pending_last_touched_rx: Option<Receiver<Option<(u32, f32, u32)>>>,
 }
 
 impl OmniApp {
@@ -178,6 +183,9 @@ impl OmniApp {
             drag_accumulated_delta: egui::Vec2::ZERO,
             last_note_length: 0.25,
             pending_note_names_rx: None,
+            is_learning: false,
+            last_touched_generation: 0,
+            pending_last_touched_rx: None,
         }
     }
 
@@ -280,6 +288,40 @@ impl eframe::App for OmniApp {
         // Decay triggers
         for track in self.tracks.iter_mut() {
             track.trigger_flash = (track.trigger_flash - 0.1).max(0.0);
+        }
+
+        // Poll for parameter learning
+        let mut newly_touched_param = None;
+        if self.is_learning {
+            // 1. Send Request if idle
+            if self.pending_last_touched_rx.is_none() {
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                let _ = self.messenger.send(EngineCommand::GetLastTouchedParam { 
+                    track_index: self.selected_track, 
+                    response_tx: tx 
+                });
+                self.pending_last_touched_rx = Some(rx);
+            }
+            
+            // 2. Check Response
+            if let Some(ref rx) = self.pending_last_touched_rx {
+                 match rx.try_recv() {
+                     Ok(Some((id, _val, gen))) => {
+                         if gen > self.last_touched_generation {
+                             newly_touched_param = Some(id);
+                             self.last_touched_generation = gen;
+                             eprintln!("[App] Learned Param: ID={}, Gen={}", id, gen);
+                         }
+                         self.pending_last_touched_rx = None;
+                     }
+                     Ok(None) => {
+                         // No touch data yet
+                         self.pending_last_touched_rx = None;
+                     }
+                     Err(crossbeam_channel::TryRecvError::Empty) => {} // Wait
+                     Err(_) => { self.pending_last_touched_rx = None; }
+                 }
+            }
         }
 
         // Poll for pending note names response
@@ -876,7 +918,15 @@ impl eframe::App for OmniApp {
                              } else { None }
                         } else { None };
 
-                        if SequencerUI::show(ui, &mut clip.step_sequencer, &mut self.selected_sequencer_lane, current_beat) {
+                        if SequencerUI::show(
+                            ui, 
+                            &mut clip.step_sequencer, 
+                            &mut self.selected_sequencer_lane, 
+                            current_beat,
+                            newly_touched_param,
+                            &self.plugin_params,
+                            &mut self.is_learning
+                        ) {
                              let _ = self.messenger.send(EngineCommand::UpdateClipSequencer {
                                 track_index: self.selected_track,
                                 clip_index: self.selected_clip,

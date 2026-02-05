@@ -69,6 +69,8 @@ pub enum EngineCommand {
     },
     // Returns (clap_id, note_names)
     GetNoteNames { track_index: usize, response_tx: Sender<(String, Vec<omni_shared::NoteNameInfo>)> },
+    // Returns (param_id, value, generation)
+    GetLastTouchedParam { track_index: usize, response_tx: Sender<Option<(u32, f32, u32)>> },
 }
 
 impl AudioEngine {
@@ -125,6 +127,7 @@ impl AudioEngine {
             track_vols: Vec<f32>,
             track_pans: Vec<f32>,
             track_events: Vec<Vec<MidiNoteEvent>>,
+            track_param_events: Vec<Vec<omni_shared::ParameterEvent>>,
             master_mix: Vec<f32>,
         }
         
@@ -136,6 +139,7 @@ impl AudioEngine {
             track_vols: vec![1.0; max_tracks],
             track_pans: vec![0.0; max_tracks],
             track_events: vec![Vec::with_capacity(128); max_tracks],
+            track_param_events: vec![Vec::with_capacity(omni_shared::MAX_PARAM_EVENTS); max_tracks],
             master_mix: vec![0.0; max_buffer_size],
         };
 
@@ -354,6 +358,18 @@ impl AudioEngine {
                                     }
                                 }
                             }
+                            EngineCommand::GetLastTouchedParam { track_index, response_tx } => {
+                                if let Some(&node_idx) = track_node_indices.get(track_index) {
+                                    if let Some(node) = graph.node_mut(node_idx) {
+                                        let touched = node.get_last_touched();
+                                        // Filter empty (0,0,0) - assuming 0 param ID might be valid but generation 0 means never touched? 
+                                        // Generation starts at 0. But incremented on touch.
+                                        // Let's pass it raw.
+                                        let result = if touched.2 > 0 { Some(touched) } else { None };
+                                        let _ = response_tx.send(result);
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -374,12 +390,14 @@ impl AudioEngine {
                         audio_buffers.track_vols.resize(track_count, 1.0);
                         audio_buffers.track_pans.resize(track_count, 0.0);
                         audio_buffers.track_events.resize(track_count, Vec::with_capacity(128));
+                        audio_buffers.track_param_events.resize(track_count, Vec::with_capacity(omni_shared::MAX_PARAM_EVENTS));
                         audio_buffers.track_bufs.resize(track_count, vec![0.0; max_buffer_size]);
                     }
                     
                     // Clear Events
                     for i in 0..track_count {
                         audio_buffers.track_events[i].clear();
+                        audio_buffers.track_param_events[i].clear();
                         // Resize buffer for this frame
                         if audio_buffers.track_bufs[i].len() != frames * 2 {
                              // This keeps capacity if it's large enough
@@ -514,7 +532,7 @@ impl AudioEngine {
                                                     }
                                                 }
                                                 
-                                                // Trigger
+                                                // Trigger MIDI Note
                                                 audio_buffers.track_events[t_idx].push(MidiNoteEvent {
                                                     note: pitch_step,
                                                     velocity,
@@ -526,6 +544,31 @@ impl AudioEngine {
                                                      let dur_beats = gate_len as f64 * step_dur_beats;
                                                      let dur_samples = (dur_beats * samples_per_beat as f64) as u64;
                                                      active_notes[t_idx].push((pitch_step, dur_samples));
+                                                }
+
+                                                // --- MODULATION TARGETS ---
+                                                // Process each modulation target, get step value, generate ParameterEvent
+                                                for mod_target in &seq.modulation_targets {
+                                                    // Get step index for this target's lane
+                                                    let mod_idx = StepGenerator::get_step_index(
+                                                        global_step_counter,
+                                                        mod_target.lane.direction,
+                                                        mod_target.lane.loop_start,
+                                                        mod_target.lane.loop_end
+                                                    );
+                                                    
+                                                    // Get the modulation value (0-127)
+                                                    let mod_value = mod_target.lane.steps.get(mod_idx).copied().unwrap_or(0);
+                                                    
+                                                    // Convert 0-127 to 0.0-1.0
+                                                    let normalized_value = mod_value as f64 / 127.0;
+                                                    
+                                                    // Push parameter event
+                                                    audio_buffers.track_param_events[t_idx].push(omni_shared::ParameterEvent {
+                                                        param_id: mod_target.param_id,
+                                                        value: normalized_value,
+                                                        sample_offset: offset_samples,
+                                                    });
                                                 }
                                             }
                                          } else {
@@ -609,8 +652,9 @@ impl AudioEngine {
                     // PASS SLICES OF PRE_ALLOCATED BUFFERS
                     let buf_slice = &mut audio_buffers.track_bufs[0..track_count];
                     let evt_slice = &audio_buffers.track_events[0..track_count];
+                    let param_evt_slice = &audio_buffers.track_param_events[0..track_count];
                     
-                    graph.process_overlay(&track_node_indices, buf_slice, evt_slice, sample_rate_val);
+                    graph.process_overlay(&track_node_indices, buf_slice, evt_slice, param_evt_slice, sample_rate_val);
 
                     // 4. Mix to Master
                     for (t_idx, track_buf) in buf_slice.iter().enumerate() {

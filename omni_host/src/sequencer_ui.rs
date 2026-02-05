@@ -22,7 +22,11 @@ impl SequencerUI {
         ui: &mut egui::Ui, 
         data: &mut StepSequencerData,
         selected_lane: &mut usize,
-        current_beat: Option<f64>
+        current_beat: Option<f64>,
+        // New args for Modulation
+        newly_touched_param: Option<u32>, 
+        param_infos: &[omni_shared::ParamInfo],
+        is_learning: &mut bool,
     ) -> bool {
         let mut changed = false;
         ui.vertical(|ui| {
@@ -34,6 +38,16 @@ impl SequencerUI {
                 ui.selectable_value(selected_lane, 3, "Probability");
                 ui.selectable_value(selected_lane, 4, "Performance");
                 ui.selectable_value(selected_lane, 5, "Modulation");
+                
+                // Add Learn Button if Modulation is selected
+                if *selected_lane == 5 {
+                    ui.separator();
+                    let btn = egui::Button::new(if *is_learning { "👂 Learning..." } else { "Learn" });
+                    let btn = if *is_learning { btn.fill(egui::Color32::from_rgb(255, 100, 100)) } else { btn };
+                    if ui.add(btn).clicked() {
+                        *is_learning = !*is_learning;
+                    }
+                }
                 
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -80,7 +94,80 @@ impl SequencerUI {
                 2 => changed |= Self::show_lane_f32(ui, &mut data.gate, "Gate", 0.0..=1.0, shared_muted, current_beat),
                 3 => changed |= Self::show_lane_u8(ui, &mut data.probability, "Probability", 0..=100, false, shared_muted, current_beat),
                 4 => changed |= Self::show_lane_u8(ui, &mut data.performance, "Performance", 0..=127, false, shared_muted, current_beat),
-                5 => changed |= Self::show_lane_u8(ui, &mut data.modulation, "Modulation", 0..=127, false, shared_muted, current_beat),
+                5 => {
+                    // Start: Modulation Target Logic
+                    
+                    // 1. Handle Learning
+                    if *is_learning {
+                        if let Some(pid) = newly_touched_param {
+                            // Check if already exists
+                            if !data.modulation_targets.iter().any(|t| t.param_id == pid) {
+                                // Add new target
+                                let name = param_infos.iter().find(|p| p.id == pid)
+                                    .map(|p| p.name.clone())
+                                    .unwrap_or_else(|| format!("Param {}", pid));
+                                
+                                data.modulation_targets.push(omni_shared::project::ModulationTarget {
+                                    param_id: pid,
+                                    name,
+                                    lane: SequencerLane::new(16, 0), // Default 0
+                                });
+                                // Auto-select new target
+                                data.active_modulation_target_index = data.modulation_targets.len() - 1;
+                                changed = true;
+                                *is_learning = false; // Auto-stop learning? Or keep going? Let's auto-stop for UX.
+                            } else {
+                                // Select existing
+                                if let Some(idx) = data.modulation_targets.iter().position(|t| t.param_id == pid) {
+                                    data.active_modulation_target_index = idx;
+                                    changed = true;
+                                    *is_learning = false;
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Target Selector
+                    if !data.modulation_targets.is_empty() {
+                         ui.horizontal(|ui| {
+                             ui.label("Target:");
+                             egui::ComboBox::from_id_salt("mod_target_selector")
+                                 .selected_text(
+                                     data.modulation_targets.get(data.active_modulation_target_index)
+                                     .map(|t| t.name.as_str())
+                                     .unwrap_or("None")
+                                 )
+                                 .show_ui(ui, |ui| {
+                                     for (i, target) in data.modulation_targets.iter().enumerate() {
+                                         if ui.selectable_value(&mut data.active_modulation_target_index, i, &target.name).changed() {
+                                             changed = true;
+                                         }
+                                     }
+                                 });
+                             
+                             // Remove Button
+                             if ui.button("🗑").clicked() {
+                                 if data.active_modulation_target_index < data.modulation_targets.len() {
+                                     data.modulation_targets.remove(data.active_modulation_target_index);
+                                     data.active_modulation_target_index = 0; // Reset
+                                     changed = true;
+                                 }
+                             }
+                         });
+                         ui.separator();
+                         
+                         // 3. Show Lane for Active Target
+                         if let Some(target) = data.modulation_targets.get_mut(data.active_modulation_target_index) {
+                             changed |= Self::show_lane_u8(ui, &mut target.lane, &format!("Mod: {}", target.name), 0..=127, false, shared_muted, current_beat);
+                         }
+                    } else {
+                        ui.label("No modulation targets. Click 'Learn' and touch a plugin parameter.");
+                        // Fallback to legacy global modulation lane if desired, or just hide it.
+                        // Let's show legacy for now if empty? Or just the message.
+                        // Message is cleaner.
+                    }
+                    // End: Modulation Target Logic
+                 },
                 _ => {}
             }
         });

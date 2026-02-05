@@ -103,6 +103,15 @@ pub struct ShmemConfig {
     pub size: usize,
 }
 
+/// Parameter Automation Event
+#[repr(C)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub struct ParameterEvent {
+    pub param_id: u32,
+    pub value: f64,
+    pub sample_offset: u32,
+}
+
 /// Layout of the Shared Memory Header
 /// This sits at the very beginning of the shared memory region.
 #[repr(C)]
@@ -115,16 +124,26 @@ pub struct OmniShmemHeader {
     pub input_offset: u32,
     /// Offset to the Audio Output Buffer
     pub output_offset: u32,
-    /// Offset to the Parameter Bank
-    pub param_offset: u32,
+    /// Offset to the Parameter Bank (Static)
+    pub param_bank_offset: u32,
     
     // Atomic Command/Response Protocol
     pub command: u32, // Host -> Plugin (0=Idle, 1=Process)
     pub response: u32, // Plugin -> Host (0=Idle, 1=Done)
     pub sample_count: u32,
+    
     pub midi_event_count: u32,
     /// Offset to the MIDI Event Buffer
     pub midi_offset: u32,
+
+    pub param_event_count: u32,
+    /// Offset to the Parameter Event Buffer
+    pub param_event_offset: u32,
+
+    // Parameter Learn / Touch Feedback
+    pub last_touched_param: u32,
+    pub last_touched_value: f32,
+    pub touch_generation: u32, // Increments on touch
 }
 
 pub const SPIN_TIMEOUT_MS: u64 = 5; // Timeout for spin loop
@@ -141,3 +160,4 @@ pub const OMNI_MAGIC: u32 = 0x01131109;
 pub const BUFFER_SIZE: usize = 512;
 pub const CHANNEL_COUNT: usize = 2;
 pub const MAX_MIDI_EVENTS: usize = 128;
+pub const MAX_PARAM_EVENTS: usize = 256;

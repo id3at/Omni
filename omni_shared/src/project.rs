@@ -182,16 +182,29 @@ impl SequencerLane<f32> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModulationTarget {
+    pub param_id: u32,
+    pub name: String,
+    pub lane: SequencerLane<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepSequencerData {
     pub pitch: SequencerLane<u8>,       // 0-127
     pub velocity: SequencerLane<u8>,    // 0-127
     pub gate: SequencerLane<f32>,       // 0.0 - 1.0+
     pub probability: SequencerLane<u8>, // 0-100%
     pub performance: SequencerLane<u8>, // Enum? For now u8 index.
-    pub modulation: SequencerLane<u8>,  // 0-127
+    pub modulation: SequencerLane<u8>,  // Legacy/Default Global Modulation
+    
+    #[serde(default)]
+    pub modulation_targets: Vec<ModulationTarget>,
     
     #[serde(default)]
     pub muted: Vec<bool>,               // Shared mute state
+
+    #[serde(default)]
+    pub active_modulation_target_index: usize,
 }
 
 impl StepSequencerData {
@@ -234,7 +247,9 @@ impl Default for StepSequencerData {
             probability: SequencerLane::new(16, 100), // Default 100%
             performance: SequencerLane::new(16, 0),
             modulation: SequencerLane::new(16, 0),
+            modulation_targets: Vec::new(),
             muted: vec![false; 16],
+            active_modulation_target_index: 0,
         }
     }
 }

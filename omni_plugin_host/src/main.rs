@@ -141,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
-                                    p.process_audio(slice, 44100.0, &[]);
+                                    p.process_audio(slice, 44100.0, &[], &[], header);
                                 } else {
                                      // Silence or passthrough (here we assume silence if no plugin)
                                      for s in slice.iter_mut() { *s = 0.0; }
@@ -164,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
-                                    p.process_audio(slice, 44100.0, &events);
+                                    p.process_audio(slice, 44100.0, &events, &[], header);
                                 }
                             }
                          }
@@ -270,9 +270,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &[]
                         };
                         
+                        let param_count = header.param_event_count;
+                        let param_offset = header.param_event_offset;
+                        let param_slice = if param_count > 0 {
+                            let param_ptr = base_ptr.add(param_offset as usize) as *const omni_shared::ParameterEvent;
+                            std::slice::from_raw_parts(param_ptr, param_count as usize)
+                        } else {
+                            &[]
+                        };
+                        
                         let guard = plugin_for_audio.read().unwrap();
                         if let Some(ref p) = *guard {
-                            p.process_audio(slice, 44100.0, midi_slice);
+                            p.process_audio(slice, 44100.0, midi_slice, param_slice, header);
                         } else {
                             // Passthrough/Silence
                              for s in slice.iter_mut() { *s = 0.0; }

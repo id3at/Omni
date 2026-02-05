@@ -110,10 +110,14 @@ extern "C" fn host_get_extension(_host: *const clap_host, extension_id: *const c
 }
 
 // Event list context for input events
-// Event list context for input events
 struct EventListContext {
     events: *const Vec<clap_event_note>,
     param_events: *const Vec<clap_event_param_value>,
+}
+
+// Context for output events (capturing parameter changes)
+struct OutputContext {
+    header: *mut omni_shared::OmniShmemHeader,
 }
 
 // Input events callback: get size
@@ -143,9 +147,26 @@ unsafe extern "C" fn input_events_get(list: *const clap_input_events, index: u32
     }
 }
 
-// Output events callback: try_push (we ignore output events for now)
-unsafe extern "C" fn output_events_try_push(_list: *const clap_output_events, _event: *const clap_event_header) -> bool {
-    true // Accept but ignore
+// Output events callback: try_push
+unsafe extern "C" fn output_events_try_push(list: *const clap_output_events, event: *const clap_event_header) -> bool {
+    let ctx = (*list).ctx as *mut OutputContext;
+    let header = &mut *(*ctx).header;
+
+    if (*event).type_ == CLAP_EVENT_PARAM_VALUE {
+        let param_event = &*(event as *const clap_event_param_value);
+        
+        // Update Shared Memory Header
+        // We use volatile writes just to be safe/explicit, though likely not strictly needed if single writer
+        std::ptr::write_volatile(&mut header.last_touched_param, param_event.param_id);
+        std::ptr::write_volatile(&mut header.last_touched_value, param_event.value as f32);
+        
+        let gen = std::ptr::read_volatile(&header.touch_generation);
+        std::ptr::write_volatile(&mut header.touch_generation, gen.wrapping_add(1));
+        
+        // eprintln!("[CLAP] Param Touched: {} Val: {}", param_event.param_id, param_event.value);
+    }
+
+    true 
 }
 
 impl ClapPlugin {
@@ -281,7 +302,9 @@ impl ClapPlugin {
         &self, 
         output_buffer: &mut [f32], 
         _sample_rate: f32,
-        midi_events: &[MidiNoteEvent]
+        midi_events: &[MidiNoteEvent],
+        param_events: &[omni_shared::ParameterEvent],
+        shmem_header: &mut omni_shared::OmniShmemHeader,
     ) {
         // Acquire internal buffer lock (Fast, Uncontended)
         let mut bufs = self.audio_buffers.lock().unwrap();
@@ -339,6 +362,26 @@ impl ClapPlugin {
             }
         }
 
+        // Process Parameter Events from Host (Sequencer)
+        for p_ev in param_events {
+             clap_param_events.push(clap_event_param_value {
+                header: clap_event_header {
+                    size: std::mem::size_of::<clap_event_param_value>() as u32,
+                    time: p_ev.sample_offset,
+                    space_id: CLAP_CORE_EVENT_SPACE_ID,
+                    type_: CLAP_EVENT_PARAM_VALUE,
+                    flags: 0,
+                },
+                param_id: p_ev.param_id,
+                cookie: ptr::null_mut(),
+                note_id: -1,
+                port_index: 0,
+                channel: -1,
+                key: -1,
+                value: p_ev.value,
+            });
+        }
+
         // 3. Setup Process Context
         let input_ctx = EventListContext { 
             events: clap_input_events, 
@@ -351,12 +394,13 @@ impl ClapPlugin {
             get: Some(input_events_get),
         };
         
-        let output_ctx = EventListContext { 
-             events: clap_input_events, // Dummy reuse 
-             param_events: clap_param_events 
+        
+        let mut output_ctx_struct = OutputContext {
+            header: shmem_header as *mut _,
         };
+
         let output_events = clap_output_events {
-            ctx: &output_ctx as *const _ as *mut c_void,
+            ctx: &mut output_ctx_struct as *mut _ as *mut c_void,
             try_push: Some(output_events_try_push),
         };
 
