@@ -1,5 +1,19 @@
 use eframe::egui;
 use omni_shared::project::{StepSequencerData, SequencerLane, SequencerDirection};
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+
+#[derive(Clone)]
+enum SequencerClipboard {
+    None,
+    Global(StepSequencerData),
+    LaneU8(SequencerLane<u8>),
+    LaneF32(SequencerLane<f32>),
+}
+
+lazy_static! {
+    static ref CLIPBOARD: Mutex<SequencerClipboard> = Mutex::new(SequencerClipboard::None);
+}
 
 pub struct SequencerUI;
 
@@ -20,6 +34,7 @@ impl SequencerUI {
                 ui.selectable_value(selected_lane, 3, "Performance");
                 ui.selectable_value(selected_lane, 4, "Modulation");
                 
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("🎲").on_hover_text("Randomize All").clicked() {
                         data.randomize_all();
@@ -28,6 +43,27 @@ impl SequencerUI {
                     if ui.button("x").on_hover_text("Reset All").clicked() {
                         data.reset_all();
                         changed = true;
+                    }
+
+                    ui.separator();
+
+                    // Global Paste
+                    let can_paste = {
+                        match CLIPBOARD.lock().unwrap().clone() {
+                            SequencerClipboard::Global(_) => true,
+                            _ => false,
+                        }
+                    };
+                    if ui.add_enabled(can_paste, egui::Button::new("P")).on_hover_text("Paste All").clicked() {
+                        if let SequencerClipboard::Global(clip_data) = CLIPBOARD.lock().unwrap().clone() {
+                            *data = clip_data;
+                            changed = true;
+                        }
+                    }
+
+                    // Global Copy
+                    if ui.button("C").on_hover_text("Copy All").clicked() {
+                        *CLIPBOARD.lock().unwrap() = SequencerClipboard::Global(data.clone());
                     }
                 });
             });
@@ -125,6 +161,7 @@ impl SequencerUI {
                 changed = true;
             }
             
+
             ui.separator();
             
             // Individual Reset/Random
@@ -136,6 +173,27 @@ impl SequencerUI {
             if ui.button("🎲").on_hover_text("Randomize Lane").clicked() {
                 lane.randomize_values(*range.start(), *range.end());
                 changed = true;
+            }
+            
+            ui.separator();
+
+             // Lane Paste
+             let can_paste = {
+                match CLIPBOARD.lock().unwrap().clone() {
+                    SequencerClipboard::LaneU8(_) => true,
+                    _ => false,
+                }
+            };
+            if ui.add_enabled(can_paste, egui::Button::new("P")).on_hover_text("Paste Lane").clicked() {
+                if let SequencerClipboard::LaneU8(l) = CLIPBOARD.lock().unwrap().clone() {
+                    *lane = l;
+                    changed = true;
+                }
+            }
+
+            // Lane Copy
+            if ui.button("C").on_hover_text("Copy Lane").clicked() {
+                 *CLIPBOARD.lock().unwrap() = SequencerClipboard::LaneU8(lane.clone());
             }
         });
         
@@ -318,6 +376,7 @@ impl SequencerUI {
                 changed = true;
             }
 
+
             ui.separator();
             
             // Individual Reset/Random
@@ -328,6 +387,27 @@ impl SequencerUI {
             if ui.button("🎲").on_hover_text("Randomize Lane").clicked() {
                 lane.randomize_values(*range.start(), *range.end());
                 changed = true;
+            }
+
+             ui.separator();
+
+             // Lane Paste
+             let can_paste = {
+                match CLIPBOARD.lock().unwrap().clone() {
+                    SequencerClipboard::LaneF32(_) => true,
+                    _ => false,
+                }
+            };
+            if ui.add_enabled(can_paste, egui::Button::new("P")).on_hover_text("Paste Lane").clicked() {
+                if let SequencerClipboard::LaneF32(l) = CLIPBOARD.lock().unwrap().clone() {
+                    *lane = l;
+                    changed = true;
+                }
+            }
+
+            // Lane Copy
+            if ui.button("C").on_hover_text("Copy Lane").clicked() {
+                 *CLIPBOARD.lock().unwrap() = SequencerClipboard::LaneF32(lane.clone());
             }
         });
         

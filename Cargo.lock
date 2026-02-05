@@ -2487,6 +2487,7 @@ dependencies = [
  "bincode",
  "crossbeam-channel",
  "eframe",
+ "lazy_static",
  "omni_engine",
  "omni_shared",
  "rfd",
