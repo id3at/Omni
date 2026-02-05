@@ -1,3 +1,4 @@
+pub mod scale;
 pub mod project;
 
 use serde::{Deserialize, Serialize};

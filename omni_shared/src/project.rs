@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::collections::HashMap;
+use crate::scale::ScaleType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum NoteCondition {
@@ -205,11 +206,19 @@ pub struct StepSequencerData {
 
     #[serde(default)]
     pub active_modulation_target_index: usize,
+
+    #[serde(default = "default_root_key")]
+    pub root_key: u8, // Default 60 (C3)
+    
+    #[serde(default)]
+    pub scale: ScaleType, // Default Chromatic
 }
+
+fn default_root_key() -> u8 { 60 }
 
 impl StepSequencerData {
     pub fn reset_all(&mut self) {
-        self.pitch.reset(60);
+        self.pitch.reset(self.root_key); // Use Root Key for pitch reset
         self.velocity.reset(100);
         self.gate.reset(0.5);
         self.probability.reset(100);
@@ -250,6 +259,8 @@ impl Default for StepSequencerData {
             modulation_targets: Vec::new(),
             muted: vec![false; 16],
             active_modulation_target_index: 0,
+            root_key: 60,
+            scale: ScaleType::default(),
         }
     }
 }

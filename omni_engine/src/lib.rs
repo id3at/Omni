@@ -486,8 +486,16 @@ impl AudioEngine {
                                                     seq.pitch.loop_start, 
                                                     seq.pitch.loop_end
                                                 );
-                                                let pitch_step = seq.pitch.steps.get(pitch_idx).copied().unwrap_or(60);
+                                                let raw_pitch = seq.pitch.steps.get(pitch_idx).copied().unwrap_or(60);
                                                 let pitch_muted = seq.muted.get(pitch_idx).copied().unwrap_or(false);
+                                                
+                                                // Quantize
+                                                let pitch_step = omni_shared::scale::quantize(
+                                                    raw_pitch,
+                                                    seq.root_key,
+                                                    seq.scale
+                                                );
+
                                                 
                                                 // 2. Get Velocity
                                                 let vel_idx = StepGenerator::get_step_index(

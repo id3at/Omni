@@ -1,5 +1,6 @@
 use eframe::egui;
 use omni_shared::project::{StepSequencerData, SequencerLane, SequencerDirection};
+use omni_shared::scale::ScaleType;
 use std::sync::Mutex;
 use lazy_static::lazy_static;
 
@@ -89,11 +90,33 @@ impl SequencerUI {
             let shared_muted = &mut data.muted;
 
             match selected_lane {
-                0 => changed |= Self::show_lane_u8(ui, &mut data.pitch, "Pitch", 0..=127, true, shared_muted, current_beat),
-                1 => changed |= Self::show_lane_u8(ui, &mut data.velocity, "Velocity", 0..=127, false, shared_muted, current_beat),
+                0 => {
+                    ui.horizontal(|ui| {
+                        ui.label("Root Key:");
+                        ui.add(egui::DragValue::new(&mut data.root_key).range(0..=127));
+                        ui.label(note_name(data.root_key)); // Helper function needed
+
+                        ui.separator();
+
+                        ui.label("Scale:");
+                        egui::ComboBox::from_id_salt("scale_selector")
+                            .selected_text(format!("{:?}", data.scale))
+                            .show_ui(ui, |ui| {
+                                for scale in ScaleType::iter() {
+                                    if ui.selectable_value(&mut data.scale, scale, format!("{:?}", scale)).changed() {
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    });
+                    ui.separator();
+                    
+                    changed |= Self::show_lane_u8(ui, &mut data.pitch, "Pitch", 0..=127, true, shared_muted, current_beat, Some((data.root_key, data.scale)));
+                }
+                1 => changed |= Self::show_lane_u8(ui, &mut data.velocity, "Velocity", 0..=127, false, shared_muted, current_beat, None),
                 2 => changed |= Self::show_lane_f32(ui, &mut data.gate, "Gate", 0.0..=1.0, shared_muted, current_beat),
-                3 => changed |= Self::show_lane_u8(ui, &mut data.probability, "Probability", 0..=100, false, shared_muted, current_beat),
-                4 => changed |= Self::show_lane_u8(ui, &mut data.performance, "Performance", 0..=127, false, shared_muted, current_beat),
+                3 => changed |= Self::show_lane_u8(ui, &mut data.probability, "Probability", 0..=100, false, shared_muted, current_beat, None),
+                4 => changed |= Self::show_lane_u8(ui, &mut data.performance, "Performance", 0..=127, false, shared_muted, current_beat, None),
                 5 => {
                     // Start: Modulation Target Logic
                     
@@ -156,9 +179,8 @@ impl SequencerUI {
                          });
                          ui.separator();
                          
-                         // 3. Show Lane for Active Target
                          if let Some(target) = data.modulation_targets.get_mut(data.active_modulation_target_index) {
-                             changed |= Self::show_lane_u8(ui, &mut target.lane, &format!("Mod: {}", target.name), 0..=127, false, shared_muted, current_beat);
+                             changed |= Self::show_lane_u8(ui, &mut target.lane, &format!("Mod: {}", target.name), 0..=127, false, shared_muted, current_beat, None);
                          }
                     } else {
                         ui.label("No modulation targets. Click 'Learn' and touch a plugin parameter.");
@@ -182,6 +204,7 @@ impl SequencerUI {
         is_pitch: bool,
         muted: &mut Vec<bool>,
         current_beat: Option<f64>,
+        scale_info: Option<(u8, ScaleType)>,
     ) -> bool {
         // Auto-resize
         if lane.loop_end as usize > lane.steps.len() {
@@ -383,10 +406,17 @@ impl SequencerUI {
 
                         // Label
                         if is_pitch {
+                             // Use raw value OR quantized value
+                             let display_val = if let Some((root, scale)) = scale_info {
+                                 omni_shared::scale::quantize(*val, root, scale)
+                             } else {
+                                 *val
+                             };
+
                             // Note Name
                             let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-                            let oct = (*val / 12) as i32 - 1; // Standard C3=60? C4=60 usually. 60/12=5 => 5-1=4. C4.
-                            let note = note_names[*val as usize % 12];
+                            let oct = (display_val / 12) as i32 - 1; 
+                            let note = note_names[display_val as usize % 12];
                             ui.label(egui::RichText::new(format!("{}{}", note, oct)).size(10.0));
                         } else {
                             ui.label(egui::RichText::new(format!("{}", val)).size(10.0));
@@ -599,4 +629,11 @@ impl SequencerUI {
         });
         changed
     }
+}
+
+fn note_name(note: u8) -> String {
+    let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let oct = (note / 12) as i32 - 1;
+    let name = note_names[note as usize % 12];
+    format!("{}{}", name, oct)
 }
