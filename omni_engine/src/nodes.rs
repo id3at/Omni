@@ -7,7 +7,8 @@ pub trait AudioNode: Send + Sync {
     /// output: buffer to write to.
     /// midi_events: slice of MIDI events for this block.
     /// param_events: slice of Parameter events for this block.
-    fn process(&mut self, output: &mut [f32], sample_rate: f32, midi_events: &[MidiNoteEvent], param_events: &[omni_shared::ParameterEvent]);
+    /// expression_events: slice of Note Expression events (e.g. tuning).
+    fn process(&mut self, output: &mut [f32], sample_rate: f32, midi_events: &[MidiNoteEvent], param_events: &[omni_shared::ParameterEvent], expression_events: &[omni_shared::ExpressionEvent]);
     
     /// Handle parameters (simplified)
     fn set_param(&mut self, _id: u32, _value: f32) {}
@@ -42,7 +43,7 @@ impl SineNode {
 }
 
 impl AudioNode for SineNode {
-    fn process(&mut self, output: &mut [f32], sample_rate: f32, _midi_events: &[omni_shared::MidiNoteEvent], _param_events: &[omni_shared::ParameterEvent]) {
+    fn process(&mut self, output: &mut [f32], sample_rate: f32, _midi_events: &[omni_shared::MidiNoteEvent], _param_events: &[omni_shared::ParameterEvent], _expression_events: &[omni_shared::ExpressionEvent]) {
         let frames = output.len() / 2;
         let (l, r) = output.split_at_mut(frames);
         
@@ -66,7 +67,7 @@ impl GainNode {
 }
 
 impl AudioNode for GainNode {
-    fn process(&mut self, output: &mut [f32], _sample_rate: f32, _midi_events: &[omni_shared::MidiNoteEvent], _param_events: &[omni_shared::ParameterEvent]) {
+    fn process(&mut self, output: &mut [f32], _sample_rate: f32, _midi_events: &[omni_shared::MidiNoteEvent], _param_events: &[omni_shared::ParameterEvent], _expression_events: &[omni_shared::ExpressionEvent]) {
         // Assuming the output buffer is interleaved stereo (LRLR...) for simplicity
         // If it's planar, the AudioNode trait's process signature would need to change
         // to accept multiple buffers (e.g., `&mut [&mut [f32]]`).

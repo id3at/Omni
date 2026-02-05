@@ -13,6 +13,7 @@ use clap_sys::events::{
     clap_event_transport, CLAP_EVENT_TRANSPORT,
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_BEATS_TIMELINE,
     CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_PLAYING,
+    clap_event_note_expression, CLAP_EVENT_NOTE_EXPRESSION, CLAP_NOTE_EXPRESSION_TUNING,
 };
 use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
 use clap_sys::ext::params::{clap_plugin_params, CLAP_EXT_PARAMS, clap_param_info};
@@ -60,6 +61,7 @@ struct AudioBuffers {
     left: Vec<f32>,
     right: Vec<f32>,
     input_events: Vec<clap_event_note>,
+    expression_events: Vec<clap_event_note_expression>,
     param_events: Vec<clap_event_param_value>,
 }
 
@@ -125,42 +127,55 @@ extern "C" fn host_get_extension(_host: *const clap_host, extension_id: *const c
     ptr::null()
 }
 
+
 // Event list context for input events
 struct EventListContext {
     events: *const Vec<clap_event_note>,
+    expression_events: *const Vec<clap_event_note_expression>,
     param_events: *const Vec<clap_event_param_value>,
 }
 
-// Context for output events (capturing parameter changes)
-struct OutputContext {
-    header: *mut omni_shared::OmniShmemHeader,
-}
+// ...
 
 // Input events callback: get size
 unsafe extern "C" fn input_events_size(list: *const clap_input_events) -> u32 {
     let ctx = (*list).ctx as *const EventListContext;
     let events = &*(*ctx).events;
+    let exprs = &*(*ctx).expression_events;
     let param_events = &*(*ctx).param_events;
-    (events.len() + param_events.len()) as u32
+    (events.len() + exprs.len() + param_events.len()) as u32
 }
 
 // Input events callback: get event
 unsafe extern "C" fn input_events_get(list: *const clap_input_events, index: u32) -> *const clap_event_header {
     let ctx = (*list).ctx as *const EventListContext;
     let events = &*(*ctx).events;
+    let exprs = &*(*ctx).expression_events;
     let param_events = &*(*ctx).param_events;
     
     let note_count = events.len();
+    let expr_count = exprs.len();
+    
     if (index as usize) < note_count {
         &events[index as usize].header as *const clap_event_header
+    } else if (index as usize) < (note_count + expr_count) {
+        let expr_idx = (index as usize) - note_count;
+        &exprs[expr_idx].header as *const clap_event_header
     } else {
-        let param_idx = (index as usize) - note_count;
+        let param_idx = (index as usize) - (note_count + expr_count);
         if param_idx < param_events.len() {
             &param_events[param_idx].header as *const clap_event_header
         } else {
             ptr::null()
         }
     }
+}
+
+// ...
+
+// Context for output events (capturing parameter changes)
+struct OutputContext {
+    header: *mut omni_shared::OmniShmemHeader,
 }
 
 // Output events callback: try_push
@@ -172,14 +187,11 @@ unsafe extern "C" fn output_events_try_push(list: *const clap_output_events, eve
         let param_event = &*(event as *const clap_event_param_value);
         
         // Update Shared Memory Header
-        // We use volatile writes just to be safe/explicit, though likely not strictly needed if single writer
         std::ptr::write_volatile(&mut header.last_touched_param, param_event.param_id);
         std::ptr::write_volatile(&mut header.last_touched_value, param_event.value as f32);
         
         let gen = std::ptr::read_volatile(&header.touch_generation);
         std::ptr::write_volatile(&mut header.touch_generation, gen.wrapping_add(1));
-        
-        // eprintln!("[CLAP] Param Touched: {} Val: {}", param_event.param_id, param_event.value);
     }
 
     true 
@@ -190,7 +202,6 @@ impl ClapPlugin {
         let lib_unix = UnixLibrary::open(Some(path), libc::RTLD_NOW | libc::RTLD_LOCAL)?;
         let library = Arc::new(Library::from(lib_unix));
         
-        // Get entry point (clap_entry is a static struct, not a function)
         let entry_ptr: Symbol<*const clap_plugin_entry> = 
             library.get(b"clap_entry")?;
 
@@ -200,7 +211,6 @@ impl ClapPlugin {
             return Err(anyhow!("clap_entry is null"));
         }
 
-        // 1. Init Entry
         let lib_path_c = CString::new(path)?;
         if let Some(init) = (*entry).init {
              if !init(lib_path_c.as_ptr()) {
@@ -210,7 +220,6 @@ impl ClapPlugin {
              return Err(anyhow!("entry.init not defined"));
         }
 
-        // 2. Get Factory
         let get_factory = (*entry).get_factory.ok_or(anyhow!("get_factory not defined"))?;
         let factory_id = b"clap.plugin-factory\0";
         let factory_ptr = get_factory(factory_id.as_ptr() as *const c_char);
@@ -219,7 +228,6 @@ impl ClapPlugin {
         }
         let factory = factory_ptr as *const clap_plugin_factory;
 
-        // 3. Get Plugin Count
         let get_plugin_count = (*factory).get_plugin_count.ok_or(anyhow!("get_plugin_count not defined"))?;
         let count = get_plugin_count(factory);
         if count == 0 {
@@ -228,14 +236,12 @@ impl ClapPlugin {
         
         let get_plugin_descriptor = (*factory).get_plugin_descriptor.ok_or(anyhow!("get_plugin_descriptor not defined"))?;
 
-        // Just take the first one
         let desc = get_plugin_descriptor(factory, 0); 
         let plugin_id = (*desc).id;
         
         let name = CStr::from_ptr((*desc).name).to_string_lossy();
         eprintln!("[CLAP] Loading: {}", name);
 
-        // 4. Create Host Structure
         let host_name = CString::new("OmniHost")?;
         let host_vendor = CString::new("Id3at")?;
         let host_url = CString::new("https://omni.local")?;
@@ -254,7 +260,6 @@ impl ClapPlugin {
             request_callback: Some(host_request_callback),
         });
 
-        // 5. Create Plugin Instance
         let host_ptr = &*host as *const clap_host;
         let create_plugin = (*factory).create_plugin.ok_or(anyhow!("create_plugin not defined"))?;
         
@@ -263,7 +268,6 @@ impl ClapPlugin {
             return Err(anyhow!("create_plugin failed"));
         }
 
-        // 6. Init Plugin
         if let Some(init) = (*plugin).init {
              if !init(plugin) {
                  return Err(anyhow!("plugin.init failed"));
@@ -272,28 +276,24 @@ impl ClapPlugin {
 
         eprintln!("[CLAP] Loaded successfully.");
 
-        // 8. Get Params Extension
         let params = if let Some(get_ext) = (*plugin).get_extension {
             get_ext(plugin, CLAP_EXT_PARAMS.as_ptr()) as *const clap_plugin_params
         } else {
             ptr::null()
         };
 
-        // 7. Activate
         if let Some(activate) = (*plugin).activate {
              if !activate(plugin, 44100.0, 32, 4096) {
                  eprintln!("[CLAP] Warning: activate failed");
              }
         }
 
-        // 8. Start Processing
         if let Some(start_processing) = (*plugin).start_processing {
              if !start_processing(plugin) {
                  eprintln!("[CLAP] Warning: start_processing failed");
              }
         }
 
-        // Pre-allocate buffers (Max buffer size 4096 to be safe)
         let max_buf = 4096;
 
         Ok(Self {
@@ -307,36 +307,35 @@ impl ClapPlugin {
                 left: vec![0.0; max_buf],
                 right: vec![0.0; max_buf],
                 input_events: Vec::with_capacity(128),
+                expression_events: Vec::with_capacity(128),
                 param_events: Vec::with_capacity(32),
             }),
         })
     }
 
-    /// Process audio with optional MIDI note events
-    /// Process audio - Zero Allocation Path
     pub unsafe fn process_audio(
         &self, 
         output_buffer: &mut [f32], 
         _sample_rate: f32,
         midi_events: &[MidiNoteEvent],
         param_events: &[omni_shared::ParameterEvent],
+        expression_events: &[omni_shared::ExpressionEvent],
         shmem_header: &mut omni_shared::OmniShmemHeader,
         transport: &TransportInfo,
     ) {
-        // Acquire internal buffer lock (Fast, Uncontended)
         let mut bufs = self.audio_buffers.lock().unwrap();
-        let AudioBuffers { left, right, input_events: clap_input_events, param_events: clap_param_events } = &mut *bufs;
+        let AudioBuffers { left, right, input_events: clap_input_events, expression_events: clap_expr_events, param_events: clap_param_events } = &mut *bufs;
         
         let frames = output_buffer.len() / 2;
         
-        // 1. Prepare Audio Buffers (Resize if needed, but usually reused)
         if left.len() < frames {
             left.resize(frames, 0.0);
             right.resize(frames, 0.0);
         }
         
-        // 2. Prepare Events
         clap_input_events.clear();
+        clap_expr_events.clear();
+        
         for ev in midi_events {
              let event_type = if ev.velocity == 0 { CLAP_EVENT_NOTE_OFF } else { CLAP_EVENT_NOTE_ON };
              clap_input_events.push(clap_event_note {
@@ -352,6 +351,47 @@ impl ClapPlugin {
                 channel: ev.channel as i16,
                 key: ev.note as i16,
                 velocity: (ev.velocity as f64 / 127.0),
+            });
+
+            // Handle Detune
+            if ev.velocity > 0 && ev.detune.abs() > 0.001 {
+                clap_expr_events.push(clap_event_note_expression {
+                    header: clap_event_header {
+                         size: std::mem::size_of::<clap_event_note_expression>() as u32,
+                         time: ev.sample_offset,
+                         space_id: CLAP_CORE_EVENT_SPACE_ID,
+                         type_: CLAP_EVENT_NOTE_EXPRESSION,
+                         flags: 0,
+                    },
+                    note_id: -1,
+                    port_index: 0,
+                    channel: ev.channel as i16,
+                    key: ev.note as i16,
+                    expression_id: CLAP_NOTE_EXPRESSION_TUNING,
+                    value: ev.detune as f64,
+                });
+            }
+        }
+
+        // Handle explicit Expression Events
+        if !expression_events.is_empty() {
+            eprintln!("[CLAP DEBUG] Processing {} expression events", expression_events.len());
+        }
+        for ev in expression_events {
+             clap_expr_events.push(clap_event_note_expression {
+                header: clap_event_header {
+                     size: std::mem::size_of::<clap_event_note_expression>() as u32,
+                     time: ev.sample_offset,
+                     space_id: CLAP_CORE_EVENT_SPACE_ID,
+                     type_: CLAP_EVENT_NOTE_EXPRESSION,
+                     flags: 0,
+                },
+                note_id: -1,
+                port_index: 0,
+                channel: ev.channel as i16,
+                key: ev.key as i16,
+                expression_id: ev.expression_id as i32,
+                value: ev.value,
             });
         }
         
@@ -379,7 +419,6 @@ impl ClapPlugin {
             }
         }
 
-        // Process Parameter Events from Host (Sequencer)
         for p_ev in param_events {
              clap_param_events.push(clap_event_param_value {
                 header: clap_event_header {
@@ -399,10 +438,10 @@ impl ClapPlugin {
             });
         }
 
-        // 3. Setup Process Context
         let input_ctx = EventListContext { 
-            events: clap_input_events, 
-            param_events: clap_param_events 
+            events: clap_input_events as *const _, 
+            expression_events: clap_expr_events as *const _,
+            param_events: clap_param_events as *const _
         };
         
         let input_events = clap_input_events {
@@ -410,7 +449,6 @@ impl ClapPlugin {
             size: Some(input_events_size),
             get: Some(input_events_get),
         };
-        
         
         let mut output_ctx_struct = OutputContext {
             header: shmem_header as *mut _,
@@ -421,7 +459,6 @@ impl ClapPlugin {
             try_push: Some(output_events_try_push),
         };
 
-        // 4. Setup Audio Buffer Pointers
         let mut output_channel_pointers = [
             left.as_mut_ptr(),
             right.as_mut_ptr()
@@ -435,7 +472,6 @@ impl ClapPlugin {
             constant_mask: 0,
         };
 
-        // 5. Build Transport Event
         let mut transport_flags: u32 = CLAP_TRANSPORT_HAS_TEMPO 
             | CLAP_TRANSPORT_HAS_BEATS_TIMELINE 
             | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
@@ -444,7 +480,6 @@ impl ClapPlugin {
             transport_flags |= CLAP_TRANSPORT_IS_PLAYING;
         }
 
-        // Convert beats to fixed-point (CLAP_BEATTIME_FACTOR = 1 << 31)
         let song_pos_beats_fixed = (transport.song_pos_beats * CLAP_BEATTIME_FACTOR as f64) as i64;
         let bar_start_fixed = (transport.bar_start_beats * CLAP_BEATTIME_FACTOR as f64) as i64;
 
@@ -458,7 +493,7 @@ impl ClapPlugin {
             },
             flags: transport_flags,
             song_pos_beats: song_pos_beats_fixed,
-            song_pos_seconds: 0, // We don't track seconds timeline
+            song_pos_seconds: 0,
             tempo: transport.tempo,
             tempo_inc: 0.0,
             loop_start_beats: 0,
@@ -483,20 +518,18 @@ impl ClapPlugin {
             out_events: &output_events,
         };
 
-        // 6. Call Plugin
-        // Use self.plugin directly (it's safe if CLAP is thread safe)
         if let Some(process_fn) = (*self.plugin).process {
             process_fn(self.plugin, &process);
         }
 
-        // 7. Interleave Output
         for i in 0..frames {
-            let l = left.get_unchecked(i); // Unsafe known bound
+            let l = left.get_unchecked(i); 
             let r = right.get_unchecked(i);
             output_buffer[i * 2] = *l;
             output_buffer[i * 2 + 1] = *r;
         }
     }
+
 
     /// Set a parameter value (queued for next process call)
     pub fn set_parameter(&self, param_id: u32, value: f64) {

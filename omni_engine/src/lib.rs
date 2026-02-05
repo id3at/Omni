@@ -128,6 +128,7 @@ impl AudioEngine {
             track_vols: Vec<f32>,
             track_pans: Vec<f32>,
             track_events: Vec<Vec<MidiNoteEvent>>,
+            track_expression_events: Vec<Vec<omni_shared::ExpressionEvent>>,
             track_param_events: Vec<Vec<omni_shared::ParameterEvent>>,
             master_mix: Vec<f32>,
         }
@@ -140,6 +141,7 @@ impl AudioEngine {
             track_vols: vec![1.0; max_tracks],
             track_pans: vec![0.0; max_tracks],
             track_events: vec![Vec::with_capacity(128); max_tracks],
+            track_expression_events: vec![Vec::with_capacity(omni_shared::MAX_EXPRESSION_EVENTS); max_tracks],
             track_param_events: vec![Vec::with_capacity(omni_shared::MAX_PARAM_EVENTS); max_tracks],
             master_mix: vec![0.0; max_buffer_size],
         };
@@ -387,17 +389,17 @@ impl AudioEngine {
                     audio_buffers.master_mix.fill(0.0);
 
                     // Track Data
-                    if audio_buffers.track_vols.len() < track_count {
                         audio_buffers.track_vols.resize(track_count, 1.0);
                         audio_buffers.track_pans.resize(track_count, 0.0);
                         audio_buffers.track_events.resize(track_count, Vec::with_capacity(128));
+                        audio_buffers.track_expression_events.resize(track_count, Vec::with_capacity(omni_shared::MAX_EXPRESSION_EVENTS));
                         audio_buffers.track_param_events.resize(track_count, Vec::with_capacity(omni_shared::MAX_PARAM_EVENTS));
                         audio_buffers.track_bufs.resize(track_count, vec![0.0; max_buffer_size]);
-                    }
                     
                     // Clear Events
                     for i in 0..track_count {
                         audio_buffers.track_events[i].clear();
+                        audio_buffers.track_expression_events[i].clear();
                         audio_buffers.track_param_events[i].clear();
                         // Resize buffer for this frame
                         if audio_buffers.track_bufs[i].len() != frames * 2 {
@@ -431,6 +433,7 @@ impl AudioEngine {
                             } else {
                                 audio_buffers.track_events[t_idx].push(MidiNoteEvent {
                                     note, velocity: 0, channel: 0, sample_offset: 0,
+                                    detune: 0.0,
                                 });
                             }
                         }
@@ -466,63 +469,92 @@ impl AudioEngine {
                                             // Determine which global steps we are covering in this buffer
                                             // 16th notes (0.25 beats)
                                             let step_dur_beats = 0.25;
-                                            // use ceil to ensure we catch the start of step
-                                            let start_step_idx = (start_beat / step_dur_beats).ceil() as u64;
+                                            // Check steps that could have subdivisions in this buffer
+                                            // Look back 1 step to catch roll subdivisions from previous step
+                                            let start_step_idx = ((start_beat / step_dur_beats).floor() as i64).max(0) as u64;
                                             let end_step_idx = (end_beat / step_dur_beats).ceil() as u64;
                                             
                                             for global_step_counter in start_step_idx..end_step_idx {
                                                 // Calculate offset in samples for this step trigger
                                                 let step_beat_time = global_step_counter as f64 * step_dur_beats;
                                                 let offset_beats = step_beat_time - start_beat;
-                                                // clamp just in case
-                                                let offset_samples = ((offset_beats * samples_per_beat as f64) as i64).max(0) as u32;
+                                                let offset_samples_raw = (offset_beats * samples_per_beat as f64) as i64;
                                                 
+                                                // Determine if this step's base trigger is in this buffer
+                                                let step_starts_in_buffer = offset_samples_raw >= 0 && offset_samples_raw < frames as i64;
+                                                let offset_samples = offset_samples_raw.max(0) as u32;
+                                                
+                                                // Skip if step start is past this buffer
                                                 if offset_samples >= frames as u32 { continue; }
 
-                                                // 1. Get Pitch
+
+                                                // 1. Get Random/Performance Mask Early if active
+                                                let rnd_idx = StepGenerator::get_step_index(
+                                                    global_step_counter, 
+                                                    seq.performance_random.direction, 
+                                                    seq.performance_random.loop_start, 
+                                                    seq.performance_random.loop_end
+                                                );
+                                                let rnd_probability = seq.performance_random.steps.get(rnd_idx).copied().unwrap_or(0);
+                                                let rnd_muted = seq.muted.get(rnd_idx).copied().unwrap_or(false);
+                                                
+                                                let mut do_randomize = false;
+                                                let random_mask = seq.random_mask_global;
+                                                
+                                                if !rnd_muted && rnd_probability > 0 {
+                                                    if fastrand::u8(1..=100) <= rnd_probability {
+                                                        do_randomize = true;
+                                                    }
+                                                }
+
+                                                // 2. Get Pitch
                                                 let pitch_idx = StepGenerator::get_step_index(
                                                     global_step_counter, 
                                                     seq.pitch.direction, 
                                                     seq.pitch.loop_start, 
                                                     seq.pitch.loop_end
                                                 );
-                                                let raw_pitch = seq.pitch.steps.get(pitch_idx).copied().unwrap_or(60);
+                                                let mut raw_pitch = seq.pitch.steps.get(pitch_idx).copied().unwrap_or(60);
                                                 let pitch_muted = seq.muted.get(pitch_idx).copied().unwrap_or(false);
                                                 
-                                                // Quantize
-                                                let pitch_step = omni_shared::scale::quantize(
-                                                    raw_pitch,
-                                                    seq.root_key,
-                                                    seq.scale
-                                                );
+                                                if do_randomize && (random_mask & 1) != 0 {
+                                                    raw_pitch = fastrand::u8(0..=127);
+                                                }
 
-                                                
-                                                // 2. Get Velocity
+                                                // 3. Get Velocity
                                                 let vel_idx = StepGenerator::get_step_index(
                                                     global_step_counter, 
                                                     seq.velocity.direction, 
                                                     seq.velocity.loop_start, 
                                                     seq.velocity.loop_end
                                                 );
-                                                let velocity = seq.velocity.steps.get(vel_idx).copied().unwrap_or(100);
+                                                let mut velocity = seq.velocity.steps.get(vel_idx).copied().unwrap_or(100);
                                                 let vel_muted = seq.muted.get(vel_idx).copied().unwrap_or(false);
                                                 
+                                                if do_randomize && (random_mask & 2) != 0 {
+                                                    velocity = fastrand::u8(0..=127);
+                                                }
+
                                                 if velocity == 0 || vel_muted || pitch_muted { continue; } // Muted step
                                                 
-                                                // 3. Get Gate
-                                                // 3. Get Gate
+                                                // 4. Get Gate
                                                 let gate_idx = StepGenerator::get_step_index(
                                                     global_step_counter, 
                                                     seq.gate.direction, 
                                                     seq.gate.loop_start, 
                                                     seq.gate.loop_end
                                                 );
-                                                let gate_len = seq.gate.steps.get(gate_idx).copied().unwrap_or(0.5);
+                                                let mut gate_len = seq.gate.steps.get(gate_idx).copied().unwrap_or(0.5);
                                                 let gate_muted = seq.muted.get(gate_idx).copied().unwrap_or(false);
+                                                
+                                                if do_randomize && (random_mask & 4) != 0 {
+                                                    gate_len = fastrand::f32();
+                                                }
 
                                                 if gate_muted { continue; }
                                                 
-                                                // 4. Get Probability
+                                                // 5. Get Probability
+                                                // ... (Keep existing prob check) ...
                                                 let prob_idx = StepGenerator::get_step_index(
                                                     global_step_counter, 
                                                     seq.probability.direction, 
@@ -533,27 +565,280 @@ impl AudioEngine {
                                                 let prob_muted = seq.muted.get(prob_idx).copied().unwrap_or(false);
 
                                                 if prob_muted { continue; }
-
-                                                // Stochastic Check
                                                 if probability < 100 {
                                                     if fastrand::u8(1..=100) > probability {
                                                         continue;
                                                     }
                                                 }
                                                 
-                                                // Trigger MIDI Note
-                                                audio_buffers.track_events[t_idx].push(MidiNoteEvent {
-                                                    note: pitch_step,
-                                                    velocity,
-                                                    channel: 0,
-                                                    sample_offset: offset_samples,
-                                                });
+                                                // --- PERFORMANCE: OCTAVE ---
+                                                let oct_idx = StepGenerator::get_step_index(
+                                                    global_step_counter, 
+                                                    seq.performance_octave.direction, 
+                                                    seq.performance_octave.loop_start, 
+                                                    seq.performance_octave.loop_end
+                                                );
+                                                let mut octave_shift = seq.performance_octave.steps.get(oct_idx).copied().unwrap_or(0);
+                                                let oct_muted = seq.muted.get(oct_idx).copied().unwrap_or(false);
                                                 
-                                                if t_idx < active_notes.len() {
-                                                     let dur_beats = gate_len as f64 * step_dur_beats;
-                                                     let dur_samples = (dur_beats * samples_per_beat as f64) as u64;
-                                                     active_notes[t_idx].push((pitch_step, dur_samples));
+                                                if !oct_muted {
+                                                    if do_randomize && (random_mask & 8) != 0 {
+                                                        octave_shift = fastrand::i8(-2..=2);
+                                                    }
+                                                    
+                                                    // Apple offset (saturating)
+                                                    let shift_semis = (octave_shift as i32) * 12;
+                                                    raw_pitch = (raw_pitch as i32 + shift_semis).clamp(0, 127) as u8;
                                                 }
+                                                
+                                                // Quantize AFTER Octave shift or BEFORE? 
+                                                // Usually before chord, but after raw pitch generation.
+                                                let quantized_pitch = omni_shared::scale::quantize(
+                                                    raw_pitch,
+                                                    seq.root_key,
+                                                    seq.scale
+                                                );
+
+                                                // --- PERFORMANCE: CHORD ---
+                                                let chd_idx = StepGenerator::get_step_index(
+                                                    global_step_counter, 
+                                                    seq.performance_chord.direction, 
+                                                    seq.performance_chord.loop_start, 
+                                                    seq.performance_chord.loop_end
+                                                );
+                                                let mut chord_type_id = seq.performance_chord.steps.get(chd_idx).copied().unwrap_or(0);
+                                                let chd_muted = seq.muted.get(chd_idx).copied().unwrap_or(false);
+                                                
+                                                if do_randomize && (random_mask & 32) != 0 {
+                                                    chord_type_id = fastrand::u8(0..=11); // Range of chords
+                                                }
+
+                                                // Resolve Chord Intervals
+                                                let mut pitches = Vec::new();
+                                                pitches.push(quantized_pitch);
+                                                
+                                                if !chd_muted && chord_type_id > 0 {
+                                                     let types: Vec<omni_shared::scale::ChordType> = omni_shared::scale::ChordType::iter().collect();
+                                                     if let Some(ctype) = types.get(chord_type_id as usize) {
+                                                         for &interval in ctype.get_intervals() {
+                                                             if interval == 0 { continue; } // Skip root, added already
+                                                             let p = (quantized_pitch as i32 + interval as i32).clamp(0, 127) as u8;
+                                                             // Re-quantize chord notes? Usually yes to stay in scale.
+                                                             // Or strict parallel intervals? 
+                                                             // Thesys says "The resulting chord will be C minor" - implies STRICT intervals.
+                                                             // Let's stick strictly to intervals defined in ChordType relative to root.
+                                                             pitches.push(p);
+                                                         }
+                                                     }
+                                                }
+
+                                                // --- PERFORMANCE: BEND ---
+                                                let bend_idx = StepGenerator::get_step_index(
+                                                    global_step_counter, 
+                                                    seq.performance_bend.direction, 
+                                                    seq.performance_bend.loop_start, 
+                                                    seq.performance_bend.loop_end
+                                                );
+                                                let bend_val = seq.performance_bend.steps.get(bend_idx).copied().unwrap_or(0); 
+                                                let bend_muted = seq.muted.get(bend_idx).copied().unwrap_or(false);
+                                                
+                                                // --- PERFORMANCE: ROLL (PATTERNS) ---
+                                                let roll_idx = StepGenerator::get_step_index(
+                                                    global_step_counter, 
+                                                    seq.performance_roll.direction, 
+                                                    seq.performance_roll.loop_start, 
+                                                    seq.performance_roll.loop_end
+                                                );
+                                                let roll_type = seq.performance_roll.steps.get(roll_idx).copied().unwrap_or(0);
+                                                let roll_muted = seq.muted.get(roll_idx).copied().unwrap_or(false);
+
+                                                // Determine if roll is active
+                                                let roll_active = !roll_muted && roll_type > 0;
+                                                
+                                                // Skip entire step processing if step doesn't start in this buffer
+                                                // (except for Roll subdivisions which are handled below)
+                                                if !step_starts_in_buffer && !roll_active {
+                                                    continue;
+                                                }
+                                                
+                                                if roll_active {
+                                                    // ROLL ACTIVE: Apply pattern with subdivisions
+                                                    let roll_pattern = omni_shared::performance::RollPattern::get(roll_type);
+                                                    let num_subdivisions = 4;
+                                                    let mut pitch_accumulator: i32 = 0; // Cumulative pitch offset
+                                                
+                                                for sub_i in 0..num_subdivisions {
+                                                    let sub_step = roll_pattern.steps[sub_i];
+                                                    
+                                                    // Update pitch accumulator based on sub-step type
+                                                    match sub_step {
+                                                        omni_shared::performance::RollSubStep::PlayUp => {
+                                                            pitch_accumulator += 1;
+                                                        },
+                                                        omni_shared::performance::RollSubStep::PlayDown => {
+                                                            pitch_accumulator -= 1;
+                                                        },
+                                                        _ => {}
+                                                    }
+                                                    
+                                                    if sub_step == omni_shared::performance::RollSubStep::Rest { continue; }
+
+                                                    // Calculate sub-offsets
+                                                    let sub_offset_beats = (step_dur_beats / num_subdivisions as f64) * sub_i as f64;
+                                                    let event_offset_beats = offset_beats + sub_offset_beats;
+                                                    
+                                                    // Calculate sample offset - allow negative/future offsets
+                                                    let event_offset_samples_raw = (event_offset_beats * samples_per_beat as f64) as i64;
+                                                    
+                                                    // If this subdivision is in the future (past buffer end), skip for now
+                                                    // It will be triggered when we reach that step in a future buffer
+                                                    if event_offset_samples_raw >= frames as i64 { continue; }
+                                                    if event_offset_samples_raw < 0 { continue; }
+                                                    
+                                                    let event_offset_samples = event_offset_samples_raw as u32;
+                                                    
+                                                    // Effective Gate - use 80% of subdivision duration, clamped
+                                                    let sub_dur_beats = step_dur_beats / num_subdivisions as f64;
+                                                    let effective_gate = 0.8_f32; // 80% of subdivision
+                                                    
+                                                    let dur_beats = effective_gate as f64 * sub_dur_beats;
+                                                    let dur_samples = (dur_beats * samples_per_beat as f64) as u64;
+
+                                                    for &base_p in &pitches {
+                                                        // Apply cumulative pitch offset
+                                                        let p = (base_p as i32 + pitch_accumulator).clamp(0, 127) as u8;
+
+                                                        // Note On
+                                                        audio_buffers.track_events[t_idx].push(MidiNoteEvent {
+                                                            note: p,
+                                                            velocity,
+                                                            channel: 0,
+                                                            sample_offset: event_offset_samples,
+                                                            detune: 0.0, 
+                                                        });
+                                                        
+                                                        // Handle Note Duration
+                                                        let end_offset_abs = event_offset_samples as u64 + dur_samples;
+                                                        
+                                                        if end_offset_abs < frames as u64 {
+                                                            audio_buffers.track_events[t_idx].push(MidiNoteEvent {
+                                                                note: p,
+                                                                velocity: 0, 
+                                                                channel: 0,
+                                                                sample_offset: end_offset_abs as u32,
+                                                                detune: 0.0,
+                                                            });
+                                                        } else {
+                                                            if t_idx < active_notes.len() {
+                                                                let remaining = end_offset_abs - frames as u64;
+                                                                active_notes[t_idx].push((p, remaining));
+                                                            }
+                                                        }
+
+                                                        // --- BEND GENERATION ---
+                                                        // Only generate if bend is enabled (value > 0) AND not muted
+                                                        if !bend_muted && bend_val > 0 {
+                                                            let start_s = event_offset_samples;
+                                                            let end_s = (event_offset_samples as u64 + dur_samples).min(frames as u64) as u32;
+                                                            
+                                                            let mut s = start_s;
+                                                            // Generate expression events - less frequently to reduce overhead
+                                                            while s < end_s {
+                                                                let time_of_s_beats = start_beat + (s as f64 / samples_per_beat as f64);
+                                                                let time_in_step_beats = time_of_s_beats - step_beat_time;
+                                                                let phase = (time_in_step_beats / step_dur_beats) as f32;
+                                                                
+                                                                let detune_val = omni_shared::performance::BendShape::get_value(bend_val, phase);
+                                                                
+                                                                audio_buffers.track_expression_events[t_idx].push(omni_shared::ExpressionEvent {
+                                                                    key: p,
+                                                                    channel: 0,
+                                                                    expression_id: omni_shared::EXPRESSION_TUNING,
+                                                                    value: detune_val as f64,
+                                                                    sample_offset: s,
+                                                                });
+                                                                
+                                                                s += 128; // Larger granularity to reduce overhead
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                } else {
+                                                    // ROLL INACTIVE: Play single normal note
+                                                    let event_offset_samples = offset_samples;
+                                                    let dur_beats = gate_len as f64 * step_dur_beats;
+                                                    let dur_samples = (dur_beats * samples_per_beat as f64) as u64;
+
+                                                    for &base_p in &pitches {
+                                                        let p = base_p;
+                                                        
+                                                        // Note On
+                                                        audio_buffers.track_events[t_idx].push(MidiNoteEvent {
+                                                            note: p,
+                                                            velocity,
+                                                            channel: 0,
+                                                            sample_offset: event_offset_samples,
+                                                            detune: 0.0,
+                                                        });
+                                                        
+                                                        // Handle Note Duration
+                                                        let end_offset_abs = event_offset_samples as u64 + dur_samples;
+                                                        
+                                                        if end_offset_abs < frames as u64 {
+                                                            audio_buffers.track_events[t_idx].push(MidiNoteEvent {
+                                                                note: p,
+                                                                velocity: 0,
+                                                                channel: 0,
+                                                                sample_offset: end_offset_abs as u32,
+                                                                detune: 0.0,
+                                                            });
+                                                        } else {
+                                                            if t_idx < active_notes.len() {
+                                                                let remaining = end_offset_abs - frames as u64;
+                                                                active_notes[t_idx].push((p, remaining));
+                                                            }
+                                                        }
+
+                                                        // --- BEND GENERATION (for non-roll notes) ---
+                                                        if !bend_muted && bend_val > 0 {
+                                                            let start_s = event_offset_samples;
+                                                            let end_s = (event_offset_samples as u64 + dur_samples).min(frames as u64) as u32;
+                                                            
+                                                            let mut s = start_s;
+                                                            while s < end_s {
+                                                                let time_of_s_beats = start_beat + (s as f64 / samples_per_beat as f64);
+                                                                let time_in_step_beats = time_of_s_beats - step_beat_time;
+                                                                let phase = (time_in_step_beats / step_dur_beats) as f32;
+                                                                
+                                                                let detune_val = omni_shared::performance::BendShape::get_value(bend_val, phase);
+                                                                
+                                                                audio_buffers.track_expression_events[t_idx].push(omni_shared::ExpressionEvent {
+                                                                    key: p,
+                                                                    channel: 0,
+                                                                    expression_id: omni_shared::EXPRESSION_TUNING,
+                                                                    value: detune_val as f64,
+                                                                    sample_offset: s,
+                                                                });
+                                                                
+                                                                s += 128;
+                                                            }
+                                                            
+                                                            // Reset pitch bend at note end to avoid stale tuning
+                                                            if end_s > start_s {
+                                                                audio_buffers.track_expression_events[t_idx].push(omni_shared::ExpressionEvent {
+                                                                    key: p,
+                                                                    channel: 0,
+                                                                    expression_id: omni_shared::EXPRESSION_TUNING,
+                                                                    value: 0.0, // Reset to neutral pitch
+                                                                    sample_offset: end_s.saturating_sub(1),
+                                                                });
+                                                            }
+                                                        }
+
+                                                    }
+                                                }
+
+                                                // --- MODULATION TARGETS ---
 
                                                 // --- MODULATION TARGETS ---
                                                 // Process each modulation target, get step value, generate ParameterEvent
@@ -640,6 +925,7 @@ impl AudioEngine {
                                                          velocity,
                                                          channel: 0,
                                                          sample_offset: offset_samples,
+                                                         detune: 0.0,
                                                      });
                                                      
                                                      if t_idx < active_notes.len() {
@@ -685,8 +971,9 @@ impl AudioEngine {
                     let buf_slice = &mut audio_buffers.track_bufs[0..track_count];
                     let evt_slice = &audio_buffers.track_events[0..track_count];
                     let param_evt_slice = &audio_buffers.track_param_events[0..track_count];
+                    let expr_evt_slice = &audio_buffers.track_expression_events[0..track_count];
                     
-                    graph.process_overlay(&track_node_indices, buf_slice, evt_slice, param_evt_slice, sample_rate_val);
+                    graph.process_overlay(&track_node_indices, buf_slice, evt_slice, param_evt_slice, expr_evt_slice, sample_rate_val);
 
                     // 4. Mix to Master
                     for (t_idx, track_buf) in buf_slice.iter().enumerate() {

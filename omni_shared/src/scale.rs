@@ -134,6 +134,81 @@ impl ScaleType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChordType {
+    None,
+    Major,
+    Minor,
+    Diminished,
+    Sus2,
+    Sus4,
+    Maj7,
+    Min7,
+    Dom7,
+    Major9,
+    Minor9,
+    Dom9,
+}
+
+impl Default for ChordType {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl ChordType {
+    pub fn get_intervals(&self) -> &'static [u8] {
+        match self {
+            ChordType::None => &[],
+            ChordType::Major => &[0, 4, 7],
+            ChordType::Minor => &[0, 3, 7],
+            ChordType::Diminished => &[0, 3, 6],
+            ChordType::Sus2 => &[0, 2, 7],
+            ChordType::Sus4 => &[0, 5, 7],
+            ChordType::Maj7 => &[0, 4, 7, 11],
+            ChordType::Min7 => &[0, 3, 7, 10],
+            ChordType::Dom7 => &[0, 4, 7, 10],
+            ChordType::Major9 => &[0, 4, 7, 11, 14],
+            ChordType::Minor9 => &[0, 3, 7, 10, 14],
+            ChordType::Dom9 => &[0, 4, 7, 10, 14],
+        }
+    }
+    
+    pub fn iter() -> impl Iterator<Item = ChordType> {
+        [
+            ChordType::None,
+            ChordType::Major,
+            ChordType::Minor,
+            ChordType::Diminished,
+            ChordType::Sus2,
+            ChordType::Sus4,
+            ChordType::Maj7,
+            ChordType::Min7,
+            ChordType::Dom7,
+            ChordType::Major9,
+            ChordType::Minor9,
+            ChordType::Dom9,
+        ].into_iter()
+    }
+    
+    pub fn name(&self) -> &'static str {
+        match self {
+            ChordType::None => "None",
+            ChordType::Major => "Maj",
+            ChordType::Minor => "Min",
+            ChordType::Diminished => "Dim",
+            ChordType::Sus2 => "Sus2",
+            ChordType::Sus4 => "Sus4",
+            ChordType::Maj7 => "Maj7",
+            ChordType::Min7 => "Min7",
+            ChordType::Dom7 => "Dom7",
+            ChordType::Major9 => "Maj9",
+            ChordType::Minor9 => "Min9",
+            ChordType::Dom9 => "Dom9",
+        }
+    }
+}
+
 /// Quantizes a note to the nearest note in the scale relative to a root key.
 /// 
 /// # Arguments

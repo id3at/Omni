@@ -142,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let transport = clap_wrapper::TransportInfo::default();
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
-                                    p.process_audio(slice, 44100.0, &[], &[], header, &transport);
+                                    p.process_audio(slice, 44100.0, &[], &[], &[], header, &transport);
                                 } else {
                                      // Silence or passthrough (here we assume silence if no plugin)
                                      for s in slice.iter_mut() { *s = 0.0; }
@@ -166,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let transport = clap_wrapper::TransportInfo::default();
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
-                                    p.process_audio(slice, 44100.0, &events, &[], header, &transport);
+                                    p.process_audio(slice, 44100.0, &events, &[], &[], header, &transport);
                                 }
                             }
                          }
@@ -281,6 +281,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &[]
                         };
                         
+                        let expr_count = header.expression_event_count;
+                        let expr_offset = header.expression_event_offset;
+                        let expr_slice = if expr_count > 0 {
+                            let expr_ptr = base_ptr.add(expr_offset as usize) as *const omni_shared::ExpressionEvent;
+                            std::slice::from_raw_parts(expr_ptr, expr_count as usize)
+                        } else {
+                            &[]
+                        };
+                        
                         // Read Transport from shmem
                         let transport = clap_wrapper::TransportInfo {
                             is_playing: header.transport_is_playing != 0,
@@ -294,7 +303,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         let guard = plugin_for_audio.read().unwrap();
                         if let Some(ref p) = *guard {
-                            p.process_audio(slice, 44100.0, midi_slice, param_slice, header, &transport);
+                            p.process_audio(slice, 44100.0, midi_slice, param_slice, expr_slice, header, &transport);
                         } else {
                             // Passthrough/Silence
                              for s in slice.iter_mut() { *s = 0.0; }

@@ -182,6 +182,31 @@ impl SequencerLane<f32> {
     }
 }
 
+impl SequencerLane<i8> {
+    pub fn shift_values(&mut self, delta: i32, min: i8, max: i8) {
+        let start = self.loop_start as usize;
+        let end = self.loop_end as usize;
+        
+        if end > self.steps.len() { return; }
+        
+        for i in start..end {
+            let val = self.steps[i] as i32 + delta;
+            self.steps[i] = val.clamp(min as i32, max as i32) as i8;
+        }
+    }
+
+    pub fn randomize_values(&mut self, min: i8, max: i8) {
+        let start = self.loop_start as usize;
+        let end = self.loop_end as usize;
+        
+        if end > self.steps.len() { return; }
+        
+        for i in start..end {
+            self.steps[i] = fastrand::i8(min..=max);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModulationTarget {
     pub param_id: u32,
@@ -195,7 +220,18 @@ pub struct StepSequencerData {
     pub velocity: SequencerLane<u8>,    // 0-127
     pub gate: SequencerLane<f32>,       // 0.0 - 1.0+
     pub probability: SequencerLane<u8>, // 0-100%
-    pub performance: SequencerLane<u8>, // Enum? For now u8 index.
+    pub performance_octave: SequencerLane<i8>, // -2, -1, 0, 1, 2
+    pub performance_bend: SequencerLane<u8>,   // Shape ID 0-19
+    pub performance_chord: SequencerLane<u8>,  // Chord Type ID
+    pub performance_roll: SequencerLane<u8>,   // Roll Type ID 0-17
+    pub performance_random: SequencerLane<u8>, // Probability 0-100%
+    
+    // Global Randomization Targets (Bitmask)
+    // 0: Pitch, 1: Velocity, 2: Gate, 3: Octave, 4: Bend, 5: Chord, 6: Roll, 7: Mod
+    #[serde(default)]
+    pub random_mask_global: u8,
+    
+    // pub performance: SequencerLane<u8>, // Enum? For now u8 index. REMOVED in favor of granular lanes
     pub modulation: SequencerLane<u8>,  // Legacy/Default Global Modulation
     
     #[serde(default)]
@@ -222,7 +258,13 @@ impl StepSequencerData {
         self.velocity.reset(100);
         self.gate.reset(0.5);
         self.probability.reset(100);
-        self.performance.reset(0);
+        
+        self.performance_octave.reset(0);
+        self.performance_bend.reset(0);
+        self.performance_chord.reset(0);
+        self.performance_roll.reset(0);
+        self.performance_random.reset(0);
+        
         self.modulation.reset(0);
         
         // Reset mutes
@@ -240,8 +282,12 @@ impl StepSequencerData {
         self.gate.randomize_values(0.0, 1.0);
         // Probability: 0-100
         self.probability.randomize_values(0, 100);
-        // Performance: 0-127
-        self.performance.randomize_values(0, 127);
+        
+        self.performance_octave.randomize_values(-2, 2);
+        self.performance_bend.randomize_values(0, 19);
+        self.performance_chord.randomize_values(0, 11); // Num chords
+        self.performance_roll.randomize_values(0, 17); // Num rolls
+        self.performance_random.randomize_values(0, 100);
         // Modulation: 0-127
         self.modulation.randomize_values(0, 127);
     }
@@ -254,7 +300,14 @@ impl Default for StepSequencerData {
             velocity: SequencerLane::new(16, 100),
             gate: SequencerLane::new(16, 0.5),
             probability: SequencerLane::new(16, 100), // Default 100%
-            performance: SequencerLane::new(16, 0),
+            
+            performance_octave: SequencerLane::new(16, 0),
+            performance_bend: SequencerLane::new(16, 0),
+            performance_chord: SequencerLane::new(16, 0),
+            performance_roll: SequencerLane::new(16, 0),
+            performance_random: SequencerLane::new(16, 0), // 0% random by default
+            
+            random_mask_global: 0,
             modulation: SequencerLane::new(16, 0),
             modulation_targets: Vec::new(),
             muted: vec![false; 16],

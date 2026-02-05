@@ -69,7 +69,7 @@ impl AudioGraph {
 
     /// Parallel processing of specific nodes with provided buffers and events.
     /// This allows the Engine to manage routing/mixing while leveraging the Graph for parallel node execution.
-    pub fn process_overlay(&mut self, nodes: &[NodeIndex], buffers: &mut [Vec<f32>], events: &[Vec<MidiNoteEvent>], param_events: &[Vec<omni_shared::ParameterEvent>], sample_rate: f32) {
+    pub fn process_overlay(&mut self, nodes: &[NodeIndex], buffers: &mut [Vec<f32>], events: &[Vec<MidiNoteEvent>], param_events: &[Vec<omni_shared::ParameterEvent>], expression_events: &[Vec<omni_shared::ExpressionEvent>], sample_rate: f32) {
         let graph_ptr = &mut self.graph as *mut DiGraph<Box<dyn AudioNode>, ()>;
         let ptr_int = graph_ptr as usize;
         
@@ -81,12 +81,13 @@ impl AudioGraph {
             .for_each(move |(i, buffer)| {
                 let graph_ref = unsafe { &mut *(ptr_int as *mut DiGraph<Box<dyn AudioNode>, ()>) };
                 // Bounds check should be unnecessary if caller ensures lengths match, but let's be safe(r) or just index.
-                if i < nodes.len() && i < events.len() && i < param_events.len() {
+                if i < nodes.len() && i < events.len() && i < param_events.len() && i < expression_events.len() {
                      let node_idx = nodes[i];
                      let event_slice = &events[i];
                      let param_event_slice = &param_events[i];
+                     let expr_event_slice = &expression_events[i];
                      if let Some(node) = graph_ref.node_weight_mut(node_idx) {
-                         node.process(buffer, sample_rate, event_slice, param_event_slice);
+                         node.process(buffer, sample_rate, event_slice, param_event_slice, expr_event_slice);
                      }
                 }
             });

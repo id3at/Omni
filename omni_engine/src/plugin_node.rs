@@ -190,7 +190,7 @@ impl Drop for PluginNode {
 }
 
 impl AudioNode for PluginNode {
-    fn process(&mut self, output: &mut [f32], _sample_rate: f32, midi_events: &[omni_shared::MidiNoteEvent], param_events: &[omni_shared::ParameterEvent]) {
+    fn process(&mut self, output: &mut [f32], _sample_rate: f32, midi_events: &[omni_shared::MidiNoteEvent], param_events: &[omni_shared::ParameterEvent], expression_events: &[omni_shared::ExpressionEvent]) {
         // Resurrection check
         let _ = self.check_resurrection();
 
@@ -236,6 +236,16 @@ impl AudioNode for PluginNode {
             if header.param_event_count > 0 {
                 let param_ptr = (ptr as *mut u8).add(param_offset_bytes) as *mut omni_shared::ParameterEvent;
                 std::ptr::copy_nonoverlapping(param_events.as_ptr(), param_ptr, header.param_event_count as usize);
+            }
+            
+            // NEW: Write Expression Events
+            let expr_offset_bytes = param_offset_bytes + (omni_shared::MAX_PARAM_EVENTS * std::mem::size_of::<omni_shared::ParameterEvent>());
+            header.expression_event_offset = expr_offset_bytes as u32;
+            header.expression_event_count = expression_events.len().min(omni_shared::MAX_EXPRESSION_EVENTS) as u32;
+
+            if header.expression_event_count > 0 {
+                let expr_ptr = (ptr as *mut u8).add(expr_offset_bytes) as *mut omni_shared::ExpressionEvent;
+                std::ptr::copy_nonoverlapping(expression_events.as_ptr(), expr_ptr, header.expression_event_count as usize);
             }
             
             // NEW: Write Transport State from global

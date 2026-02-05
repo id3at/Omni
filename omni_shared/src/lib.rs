@@ -1,5 +1,6 @@
 pub mod scale;
 pub mod project;
+pub mod performance;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -15,6 +16,18 @@ pub struct MidiNoteEvent {
     /// MIDI channel (0-15)
     pub channel: u8,
     /// Sample offset within the current buffer
+    pub sample_offset: u32,
+    /// Detune in semitones (e.g., 0.0 = none, 1.0 = +1 semitone)
+    pub detune: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub struct ExpressionEvent {
+    pub key: u8,
+    pub channel: u8,
+    pub expression_id: u32, // matches CLAP_NOTE_EXPRESSION_*
+    pub value: f64,
     pub sample_offset: u32,
 }
 
@@ -141,6 +154,10 @@ pub struct OmniShmemHeader {
     /// Offset to the Parameter Event Buffer
     pub param_event_offset: u32,
 
+    pub expression_event_count: u32,
+    /// Offset to the Note Expression Event Buffer
+    pub expression_event_offset: u32,
+
     // Parameter Learn / Touch Feedback
     pub last_touched_param: u32,
     pub last_touched_value: f32,
@@ -171,3 +188,5 @@ pub const BUFFER_SIZE: usize = 512;
 pub const CHANNEL_COUNT: usize = 2;
 pub const MAX_MIDI_EVENTS: usize = 128;
 pub const MAX_PARAM_EVENTS: usize = 256;
+pub const MAX_EXPRESSION_EVENTS: usize = 256;
+pub const EXPRESSION_TUNING: u32 = 2; // CLAP_NOTE_EXPRESSION_TUNING = 2
