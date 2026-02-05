@@ -82,6 +82,28 @@ impl SequencerUI {
             if ui.add(egui::DragValue::new(&mut lane.loop_start)).changed() { changed = true; }
             ui.label("End:");
             if ui.add(egui::DragValue::new(&mut lane.loop_end)).changed() { changed = true; }
+
+            ui.separator();
+
+            // Shift Controls
+            if ui.button("<").clicked() {
+                lane.shift_left();
+                changed = true;
+            }
+            if ui.button(">").clicked() {
+                lane.shift_right();
+                changed = true;
+            }
+            if ui.button("v").clicked() {
+                let delta = if is_pitch { -1 } else { -5 };
+                lane.shift_values(delta, *range.start(), *range.end());
+                changed = true;
+            }
+            if ui.button("^").clicked() {
+                let delta = if is_pitch { 1 } else { 5 };
+                lane.shift_values(delta, *range.start(), *range.end());
+                changed = true;
+            }
         });
         
         ui.separator();
@@ -208,6 +230,26 @@ impl SequencerUI {
             if ui.add(egui::DragValue::new(&mut lane.loop_start)).changed() { changed = true; }
             ui.label("End:");
             if ui.add(egui::DragValue::new(&mut lane.loop_end)).changed() { changed = true; }
+
+            ui.separator();
+
+             // Shift Controls
+            if ui.button("<").clicked() {
+                lane.shift_left();
+                changed = true;
+            }
+            if ui.button(">").clicked() {
+                lane.shift_right();
+                changed = true;
+            }
+            if ui.button("v").clicked() {
+                lane.shift_values(-0.05, *range.start(), *range.end());
+                changed = true;
+            }
+            if ui.button("^").clicked() {
+                lane.shift_values(0.05, *range.start(), *range.end());
+                changed = true;
+            }
         });
         
         ui.separator();

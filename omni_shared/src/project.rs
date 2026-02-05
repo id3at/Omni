@@ -89,6 +89,62 @@ impl<T: Default + Clone> Default for SequencerLane<T> {
     }
 }
 
+impl<T: Clone> SequencerLane<T> {
+    pub fn shift_left(&mut self) {
+        if self.loop_end <= self.loop_start { return; }
+        
+        let start = self.loop_start as usize;
+        let end = self.loop_end as usize;
+        
+        if end > self.steps.len() { return; }
+        if start >= end { return; }
+        
+        let slice = &mut self.steps[start..end];
+        slice.rotate_left(1);
+    }
+    
+    pub fn shift_right(&mut self) {
+        if self.loop_end <= self.loop_start { return; }
+
+        let start = self.loop_start as usize;
+        let end = self.loop_end as usize;
+        
+        if end > self.steps.len() { return; }
+        if start >= end { return; }
+        
+        let slice = &mut self.steps[start..end];
+        slice.rotate_right(1);
+    }
+}
+
+impl SequencerLane<u8> {
+    pub fn shift_values(&mut self, delta: i32, min: u8, max: u8) {
+        let start = self.loop_start as usize;
+        let end = self.loop_end as usize;
+        
+        if end > self.steps.len() { return; }
+        
+        for i in start..end {
+            let val = self.steps[i] as i32 + delta;
+            self.steps[i] = val.clamp(min as i32, max as i32) as u8;
+        }
+    }
+}
+
+impl SequencerLane<f32> {
+    pub fn shift_values(&mut self, delta: f32, min: f32, max: f32) {
+        let start = self.loop_start as usize;
+        let end = self.loop_end as usize;
+        
+        if end > self.steps.len() { return; }
+        
+        for i in start..end {
+            let val = self.steps[i] + delta;
+            self.steps[i] = val.clamp(min, max);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepSequencerData {
     pub pitch: SequencerLane<u8>,       // 0-127 (or 0-24 relative?) Thesys is +/- 12 steps or relative. Let's stick to absolute MIDI notes for now or relative? Plan said "Pitch (0-127)".
