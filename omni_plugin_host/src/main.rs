@@ -139,9 +139,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let data_ptr = shmem_mapping.as_ptr().add(std::mem::size_of::<OmniShmemHeader>()) as *mut f32;
                                 let slice = std::slice::from_raw_parts_mut(data_ptr, count as usize);
                                 
+                                let transport = clap_wrapper::TransportInfo::default();
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
-                                    p.process_audio(slice, 44100.0, &[], &[], header);
+                                    p.process_audio(slice, 44100.0, &[], &[], header, &transport);
                                 } else {
                                      // Silence or passthrough (here we assume silence if no plugin)
                                      for s in slice.iter_mut() { *s = 0.0; }
@@ -162,9 +163,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let data_ptr = shmem_mapping.as_ptr().add(std::mem::size_of::<OmniShmemHeader>()) as *mut f32;
                                 let slice = std::slice::from_raw_parts_mut(data_ptr, count as usize);
                                 
+                                let transport = clap_wrapper::TransportInfo::default();
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
-                                    p.process_audio(slice, 44100.0, &events, &[], header);
+                                    p.process_audio(slice, 44100.0, &events, &[], header, &transport);
                                 }
                             }
                          }
@@ -279,9 +281,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &[]
                         };
                         
+                        // Read Transport from shmem
+                        let transport = clap_wrapper::TransportInfo {
+                            is_playing: header.transport_is_playing != 0,
+                            tempo: header.transport_tempo,
+                            song_pos_beats: header.transport_song_pos_beats,
+                            bar_start_beats: header.transport_bar_start_beats,
+                            bar_number: header.transport_bar_number,
+                            time_sig_num: header.transport_time_sig_num,
+                            time_sig_denom: header.transport_time_sig_denom,
+                        };
+                        
                         let guard = plugin_for_audio.read().unwrap();
                         if let Some(ref p) = *guard {
-                            p.process_audio(slice, 44100.0, midi_slice, param_slice, header);
+                            p.process_audio(slice, 44100.0, midi_slice, param_slice, header, &transport);
                         } else {
                             // Passthrough/Silence
                              for s in slice.iter_mut() { *s = 0.0; }

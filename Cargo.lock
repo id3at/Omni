@@ -2470,6 +2470,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "fastrand",
+ "lazy_static",
  "omni_shared",
  "petgraph",
  "rayon",

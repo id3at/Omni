@@ -238,6 +238,16 @@ impl AudioNode for PluginNode {
                 std::ptr::copy_nonoverlapping(param_events.as_ptr(), param_ptr, header.param_event_count as usize);
             }
             
+            // NEW: Write Transport State from global
+            let transport = crate::transport::get_transport();
+            header.transport_is_playing = if transport.is_playing { 1 } else { 0 };
+            header.transport_tempo = transport.tempo;
+            header.transport_song_pos_beats = transport.song_pos_beats;
+            header.transport_bar_start_beats = transport.bar_start_beats;
+            header.transport_bar_number = transport.bar_number;
+            header.transport_time_sig_num = transport.time_sig_num;
+            header.transport_time_sig_denom = transport.time_sig_denom;
+            
             // 3. Signal Process
             // std::sync::atomic::fence(Ordering::Release); // Ensure data is visible?
             std::ptr::write_volatile(&mut header.command, omni_shared::CMD_PROCESS);

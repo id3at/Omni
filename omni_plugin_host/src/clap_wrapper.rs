@@ -10,7 +10,11 @@ use clap_sys::events::{
     clap_input_events, clap_output_events, clap_event_header, clap_event_note,
     CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_ON, CLAP_EVENT_NOTE_OFF,
     clap_event_param_value, CLAP_EVENT_PARAM_VALUE,
+    clap_event_transport, CLAP_EVENT_TRANSPORT,
+    CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_BEATS_TIMELINE,
+    CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_PLAYING,
 };
+use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
 use clap_sys::ext::params::{clap_plugin_params, CLAP_EXT_PARAMS, clap_param_info};
 use clap_sys::ext::gui::{clap_plugin_gui, CLAP_EXT_GUI, clap_window, CLAP_WINDOW_API_X11};
 use clap_sys::ext::timer_support::{clap_plugin_timer_support, clap_host_timer_support, CLAP_EXT_TIMER_SUPPORT};
@@ -39,6 +43,18 @@ lazy_static::lazy_static! {
 }
 
 use omni_shared::MidiNoteEvent;
+
+/// Transport information passed from the audio engine to plugins
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TransportInfo {
+    pub is_playing: bool,
+    pub tempo: f64,
+    pub song_pos_beats: f64,
+    pub bar_start_beats: f64,
+    pub bar_number: i32,
+    pub time_sig_num: u16,
+    pub time_sig_denom: u16,
+}
 
 struct AudioBuffers {
     left: Vec<f32>,
@@ -305,6 +321,7 @@ impl ClapPlugin {
         midi_events: &[MidiNoteEvent],
         param_events: &[omni_shared::ParameterEvent],
         shmem_header: &mut omni_shared::OmniShmemHeader,
+        transport: &TransportInfo,
     ) {
         // Acquire internal buffer lock (Fast, Uncontended)
         let mut bufs = self.audio_buffers.lock().unwrap();
@@ -418,10 +435,46 @@ impl ClapPlugin {
             constant_mask: 0,
         };
 
+        // 5. Build Transport Event
+        let mut transport_flags: u32 = CLAP_TRANSPORT_HAS_TEMPO 
+            | CLAP_TRANSPORT_HAS_BEATS_TIMELINE 
+            | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+        
+        if transport.is_playing {
+            transport_flags |= CLAP_TRANSPORT_IS_PLAYING;
+        }
+
+        // Convert beats to fixed-point (CLAP_BEATTIME_FACTOR = 1 << 31)
+        let song_pos_beats_fixed = (transport.song_pos_beats * CLAP_BEATTIME_FACTOR as f64) as i64;
+        let bar_start_fixed = (transport.bar_start_beats * CLAP_BEATTIME_FACTOR as f64) as i64;
+
+        let transport_event = clap_event_transport {
+            header: clap_event_header {
+                size: std::mem::size_of::<clap_event_transport>() as u32,
+                time: 0,
+                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                type_: CLAP_EVENT_TRANSPORT,
+                flags: 0,
+            },
+            flags: transport_flags,
+            song_pos_beats: song_pos_beats_fixed,
+            song_pos_seconds: 0, // We don't track seconds timeline
+            tempo: transport.tempo,
+            tempo_inc: 0.0,
+            loop_start_beats: 0,
+            loop_end_beats: 0,
+            loop_start_seconds: 0,
+            loop_end_seconds: 0,
+            bar_start: bar_start_fixed,
+            bar_number: transport.bar_number,
+            tsig_num: transport.time_sig_num,
+            tsig_denom: transport.time_sig_denom,
+        };
+
         let process = clap_process {
             steady_time: -1, 
             frames_count: frames as u32,
-            transport: ptr::null(),
+            transport: &transport_event,
             audio_inputs: ptr::null(), 
             audio_outputs: &mut audio_outputs,
             audio_inputs_count: 0,
@@ -430,13 +483,13 @@ impl ClapPlugin {
             out_events: &output_events,
         };
 
-        // 5. Call Plugin
+        // 6. Call Plugin
         // Use self.plugin directly (it's safe if CLAP is thread safe)
         if let Some(process_fn) = (*self.plugin).process {
             process_fn(self.plugin, &process);
         }
 
-        // 6. Interleave Output
+        // 7. Interleave Output
         for i in 0..frames {
             let l = left.get_unchecked(i); // Unsafe known bound
             let r = right.get_unchecked(i);

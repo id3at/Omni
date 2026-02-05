@@ -2,6 +2,7 @@ pub mod graph;
 pub mod nodes;
 pub mod plugin_node;
 pub mod sequencer;
+pub mod transport;
 
 use crate::graph::AudioGraph;
 use crate::nodes::{GainNode}; // Added GainNode
@@ -648,7 +649,30 @@ impl AudioEngine {
                          }
                     }
 
-                    // 3. Parallel Process Graph
+                    // 3. Update Global Transport for PluginNodes
+                    {
+                        let bpm = sequencer.bpm;
+                        let samples_per_beat = (sample_rate_val * 60.0) / bpm;
+                        let current_sample = pos_counter.load(Ordering::Relaxed);
+                        let song_pos_beats = (current_sample as f64) / samples_per_beat as f64;
+                        
+                        // Calculate bar position (assuming 4/4 time signature)
+                        let beats_per_bar = 4.0;
+                        let bar_number = (song_pos_beats / beats_per_bar).floor() as i32;
+                        let bar_start_beats = bar_number as f64 * beats_per_bar;
+                        
+                        crate::transport::update_transport(crate::transport::TransportState {
+                            is_playing: playing,
+                            tempo: bpm as f64,
+                            song_pos_beats,
+                            bar_start_beats,
+                            bar_number,
+                            time_sig_num: 4,
+                            time_sig_denom: 4,
+                        });
+                    }
+
+                    // 4. Parallel Process Graph
                     // PASS SLICES OF PRE_ALLOCATED BUFFERS
                     let buf_slice = &mut audio_buffers.track_bufs[0..track_count];
                     let evt_slice = &audio_buffers.track_events[0..track_count];

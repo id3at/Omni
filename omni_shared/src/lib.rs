@@ -144,6 +144,15 @@ pub struct OmniShmemHeader {
     pub last_touched_param: u32,
     pub last_touched_value: f32,
     pub touch_generation: u32, // Increments on touch
+
+    // Transport Information
+    pub transport_is_playing: u32,   // 0 = stopped, 1 = playing
+    pub transport_tempo: f64,        // BPM
+    pub transport_song_pos_beats: f64,  // Current position in beats
+    pub transport_bar_start_beats: f64, // Start of current bar in beats
+    pub transport_bar_number: i32,   // Current bar number
+    pub transport_time_sig_num: u16, // Time signature numerator
+    pub transport_time_sig_denom: u16, // Time signature denominator
 }
 
 pub const SPIN_TIMEOUT_MS: u64 = 5; // Timeout for spin loop
