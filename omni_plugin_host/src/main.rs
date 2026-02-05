@@ -31,6 +31,7 @@ enum CustomEvent {
     OpenEditor,
     Initialize(Uuid, omni_shared::ShmemConfig),
     LoadPlugin(String),
+    Shutdown, 
 }
 
 // Wrapper for Shmem to force Send/Sync (we rely on Mutex for safety)
@@ -216,6 +217,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        // EOF reached (Parent likely closed stdin)
+        let _ = event_loop_proxy.send_event(CustomEvent::Shutdown);
     });
 
     // Spawn Audio Thread (High Priority Poll)
@@ -433,6 +436,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::WindowEvent { event: _event, .. } => {
                // println!("[Event] Other WindowEvent: {:?}", event); // Too noisy usually, but okay for now if commented out
+            }
+            Event::UserEvent(CustomEvent::Shutdown) => {
+                 let mut f = log_file.lock().unwrap();
+                 let _ = writeln!(f, "[Main] Shutdown received via IPC/EOF. Exiting...");
+                 target.exit();
             }
             _ => {}
         }

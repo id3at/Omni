@@ -21,6 +21,36 @@ unsafe impl Sync for PluginNode {}
 unsafe impl Send for PluginNode {}
 
 impl PluginNode {
+    fn find_plugin_host() -> Result<std::path::PathBuf, anyhow::Error> {
+        // 1. Check same directory as executable (Production/Deployment)
+        if let Ok(mut path) = std::env::current_exe() {
+            path.pop(); // Remove executable name
+            path.push("omni_plugin_host");
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        // 2. Check Standard Cargo Target dirs (Development)
+        // Check for release binary first if in release mode or if debug missing
+        let release_path = std::path::Path::new("./target/release/omni_plugin_host");
+        let debug_path = std::path::Path::new("./target/debug/omni_plugin_host");
+
+        if !cfg!(debug_assertions) && release_path.exists() {
+             return Ok(release_path.to_path_buf());
+        }
+        
+        if debug_path.exists() {
+            return Ok(debug_path.to_path_buf());
+        }
+
+        if release_path.exists() {
+             return Ok(release_path.to_path_buf());
+        }
+
+        Err(anyhow::anyhow!("Could not find omni_plugin_host binary! Tried current dir, target/debug, and target/release."))
+    }
+
     pub fn new(plugin_path: &str) -> Result<Self, anyhow::Error> {
         // 1. Setup Shared Memory
         let shmem_config = omni_shared::ShmemConfig {
@@ -42,29 +72,10 @@ impl PluginNode {
         }
 
         // 2. Spawn Plugin Host
-        // Check for release binary first if in release mode, otherwise debug
-        let debug_path = "./target/debug/omni_plugin_host";
-        let release_path = "./target/release/omni_plugin_host";
-        
-        // Use release binary if we are in release mode OR if debug binary doesn't exist but release does
-        let binary_path = if !cfg!(debug_assertions) && std::path::Path::new(release_path).exists() {
-            eprintln!("[PluginNode] Using Release Binary: {}", release_path);
-            release_path
-        } else if std::path::Path::new(debug_path).exists() {
-            eprintln!("[PluginNode] Using Debug Binary: {}", debug_path);
-            debug_path
-        } else {
-            // Fallback to release if debug missing
-             if std::path::Path::new(release_path).exists() {
-                 eprintln!("[PluginNode] Debug missing, using Release Binary: {}", release_path);
-                 release_path
-             } else {
-                 eprintln!("[PluginNode] neither debug nor release binary found, trying debug path");
-                 debug_path
-             }
-        };
+        let binary_path = Self::find_plugin_host()?;
+        eprintln!("[PluginNode] Spawning: {:?}", binary_path);
 
-        let mut child = Command::new(binary_path)
+        let mut child = Command::new(&binary_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) 
@@ -118,7 +129,8 @@ impl PluginNode {
             eprintln!("[PluginNode] CRASH DETECTED! Resurrecting...");
             
             // 1. Spawn Plugin Host again
-            let mut child = Command::new("./target/debug/omni_plugin_host")
+            let binary_path = Self::find_plugin_host()?;
+            let mut child = Command::new(binary_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit()) 
@@ -172,6 +184,8 @@ impl PluginNode {
 
 impl Drop for PluginNode {
     fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait(); // Clean up zombie
     }
 }
 

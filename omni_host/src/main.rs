@@ -851,7 +851,7 @@ impl eframe::App for OmniApp {
                     ui.horizontal(|ui| {
                         let mode_text = if clip.use_sequencer { "STEP SEQUENCER" } else { "PIANO ROLL" };
                         let mode_color = if clip.use_sequencer { egui::Color32::YELLOW } else { egui::Color32::LIGHT_BLUE };
-                        if ui.add(egui::Button::new(egui::RichText::new(mode_text).strong()).fill(mode_color)).clicked() {
+                        if ui.add(egui::Button::new(egui::RichText::new(mode_text).strong().color(egui::Color32::BLACK)).fill(mode_color)).clicked() {
                             clip.use_sequencer = !clip.use_sequencer;
                             if clip.use_sequencer {
                                 self.selected_sequencer_lane = 1; // Default to VELOCITY as requested
