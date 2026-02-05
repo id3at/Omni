@@ -186,6 +186,7 @@ pub struct StepSequencerData {
     pub pitch: SequencerLane<u8>,       // 0-127
     pub velocity: SequencerLane<u8>,    // 0-127
     pub gate: SequencerLane<f32>,       // 0.0 - 1.0+
+    pub probability: SequencerLane<u8>, // 0-100%
     pub performance: SequencerLane<u8>, // Enum? For now u8 index.
     pub modulation: SequencerLane<u8>,  // 0-127
     
@@ -198,6 +199,7 @@ impl StepSequencerData {
         self.pitch.reset(60);
         self.velocity.reset(100);
         self.gate.reset(0.5);
+        self.probability.reset(100);
         self.performance.reset(0);
         self.modulation.reset(0);
         
@@ -214,6 +216,8 @@ impl StepSequencerData {
         self.velocity.randomize_values(0, 127);
         // Gate: 0.0-1.0
         self.gate.randomize_values(0.0, 1.0);
+        // Probability: 0-100
+        self.probability.randomize_values(0, 100);
         // Performance: 0-127
         self.performance.randomize_values(0, 127);
         // Modulation: 0-127
@@ -227,6 +231,7 @@ impl Default for StepSequencerData {
             pitch: SequencerLane::new(16, 60), // C3
             velocity: SequencerLane::new(16, 100),
             gate: SequencerLane::new(16, 0.5),
+            probability: SequencerLane::new(16, 100), // Default 100%
             performance: SequencerLane::new(16, 0),
             modulation: SequencerLane::new(16, 0),
             muted: vec![false; 16],

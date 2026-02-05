@@ -483,6 +483,7 @@ impl AudioEngine {
                                                 if velocity == 0 || vel_muted || pitch_muted { continue; } // Muted step
                                                 
                                                 // 3. Get Gate
+                                                // 3. Get Gate
                                                 let gate_idx = StepGenerator::get_step_index(
                                                     global_step_counter, 
                                                     seq.gate.direction, 
@@ -493,6 +494,25 @@ impl AudioEngine {
                                                 let gate_muted = seq.muted.get(gate_idx).copied().unwrap_or(false);
 
                                                 if gate_muted { continue; }
+                                                
+                                                // 4. Get Probability
+                                                let prob_idx = StepGenerator::get_step_index(
+                                                    global_step_counter, 
+                                                    seq.probability.direction, 
+                                                    seq.probability.loop_start, 
+                                                    seq.probability.loop_end
+                                                );
+                                                let probability = seq.probability.steps.get(prob_idx).copied().unwrap_or(100);
+                                                let prob_muted = seq.muted.get(prob_idx).copied().unwrap_or(false);
+
+                                                if prob_muted { continue; }
+
+                                                // Stochastic Check
+                                                if probability < 100 {
+                                                    if fastrand::u8(1..=100) > probability {
+                                                        continue;
+                                                    }
+                                                }
                                                 
                                                 // Trigger
                                                 audio_buffers.track_events[t_idx].push(MidiNoteEvent {

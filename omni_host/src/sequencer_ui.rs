@@ -31,8 +31,9 @@ impl SequencerUI {
                 ui.selectable_value(selected_lane, 0, "Pitch");
                 ui.selectable_value(selected_lane, 1, "Velocity");
                 ui.selectable_value(selected_lane, 2, "Gate");
-                ui.selectable_value(selected_lane, 3, "Performance");
-                ui.selectable_value(selected_lane, 4, "Modulation");
+                ui.selectable_value(selected_lane, 3, "Probability");
+                ui.selectable_value(selected_lane, 4, "Performance");
+                ui.selectable_value(selected_lane, 5, "Modulation");
                 
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -77,8 +78,9 @@ impl SequencerUI {
                 0 => changed |= Self::show_lane_u8(ui, &mut data.pitch, "Pitch", 0..=127, true, shared_muted, current_beat),
                 1 => changed |= Self::show_lane_u8(ui, &mut data.velocity, "Velocity", 0..=127, false, shared_muted, current_beat),
                 2 => changed |= Self::show_lane_f32(ui, &mut data.gate, "Gate", 0.0..=1.0, shared_muted, current_beat),
-                3 => changed |= Self::show_lane_u8(ui, &mut data.performance, "Performance", 0..=127, false, shared_muted, current_beat),
-                4 => changed |= Self::show_lane_u8(ui, &mut data.modulation, "Modulation", 0..=127, false, shared_muted, current_beat),
+                3 => changed |= Self::show_lane_u8(ui, &mut data.probability, "Probability", 0..=100, false, shared_muted, current_beat),
+                4 => changed |= Self::show_lane_u8(ui, &mut data.performance, "Performance", 0..=127, false, shared_muted, current_beat),
+                5 => changed |= Self::show_lane_u8(ui, &mut data.modulation, "Modulation", 0..=127, false, shared_muted, current_beat),
                 _ => {}
             }
         });
