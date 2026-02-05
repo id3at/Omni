@@ -468,6 +468,7 @@ impl AudioEngine {
                                                     seq.pitch.loop_end
                                                 );
                                                 let pitch_step = seq.pitch.steps.get(pitch_idx).copied().unwrap_or(60);
+                                                let pitch_muted = seq.pitch.muted.get(pitch_idx).copied().unwrap_or(false);
                                                 
                                                 // 2. Get Velocity
                                                 let vel_idx = StepGenerator::get_step_index(
@@ -477,8 +478,9 @@ impl AudioEngine {
                                                     seq.velocity.loop_end
                                                 );
                                                 let velocity = seq.velocity.steps.get(vel_idx).copied().unwrap_or(100);
+                                                let vel_muted = seq.velocity.muted.get(vel_idx).copied().unwrap_or(false);
                                                 
-                                                if velocity == 0 { continue; } // Muted step
+                                                if velocity == 0 || vel_muted || pitch_muted { continue; } // Muted step
                                                 
                                                 // 3. Get Gate
                                                 let gate_idx = StepGenerator::get_step_index(
@@ -488,6 +490,9 @@ impl AudioEngine {
                                                     seq.gate.loop_end
                                                 );
                                                 let gate_len = seq.gate.steps.get(gate_idx).copied().unwrap_or(0.5);
+                                                let gate_muted = seq.gate.muted.get(gate_idx).copied().unwrap_or(false);
+
+                                                if gate_muted { continue; }
                                                 
                                                 // Trigger
                                                 audio_buffers.track_events[t_idx].push(MidiNoteEvent {

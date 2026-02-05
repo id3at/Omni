@@ -24,11 +24,11 @@ impl SequencerUI {
             ui.separator();
             
             match selected_lane {
-                0 => changed |= Self::show_lane_u8(ui, &mut data.pitch, "Pitch", 0..=127, true, current_beat),
-                1 => changed |= Self::show_lane_u8(ui, &mut data.velocity, "Velocity", 0..=127, false, current_beat),
-                2 => changed |= Self::show_lane_f32(ui, &mut data.gate, "Gate", 0.0..=1.0, current_beat),
-                3 => changed |= Self::show_lane_u8(ui, &mut data.performance, "Performance", 0..=127, false, current_beat),
-                4 => changed |= Self::show_lane_u8(ui, &mut data.modulation, "Modulation", 0..=127, false, current_beat),
+                0 => changed |= Self::show_lane_u8(ui, &mut data.pitch, "Pitch", 0..=127, true, true, current_beat),
+                1 => changed |= Self::show_lane_u8(ui, &mut data.velocity, "Velocity", 0..=127, false, true, current_beat),
+                2 => changed |= Self::show_lane_f32(ui, &mut data.gate, "Gate", 0.0..=1.0, true, current_beat),
+                3 => changed |= Self::show_lane_u8(ui, &mut data.performance, "Performance", 0..=127, false, true, current_beat),
+                4 => changed |= Self::show_lane_u8(ui, &mut data.modulation, "Modulation", 0..=127, false, true, current_beat),
                 _ => {}
             }
         });
@@ -41,12 +41,14 @@ impl SequencerUI {
         label: &str, 
         range: std::ops::RangeInclusive<u8>,
         is_pitch: bool,
+        has_mute: bool,
         current_beat: Option<f64>,
     ) -> bool {
         // Auto-resize
         if lane.loop_end as usize > lane.steps.len() {
             let default_val = if is_pitch { 60 } else { 100 };
             lane.steps.resize(lane.loop_end as usize, default_val);
+            lane.muted.resize(lane.loop_end as usize, false);
             // changed = true; // Technically changed structure, but effectively just adding defaults. 
             // Better to flag changed so engine picks it up? Yes.
             // But we can't easily set changed here before declaration. 
@@ -55,10 +57,16 @@ impl SequencerUI {
             // Let's set changed = true at initialization.
         }
 
+        // Sync muted length if loaded from old data
+        if lane.muted.len() < lane.steps.len() {
+            lane.muted.resize(lane.steps.len(), false);
+        }
+
         let mut changed = if lane.loop_end as usize > lane.steps.len() { true } else { false };
         if changed {
              let default_val = if is_pitch { 60 } else { 100 };
              lane.steps.resize(lane.loop_end as usize, default_val);
+             lane.muted.resize(lane.loop_end as usize, false);
         }
         
         ui.horizontal(|ui| {
@@ -176,6 +184,33 @@ impl SequencerUI {
                             }
                         }
                         
+                        // MUTE BUTTON
+                        if has_mute {
+                            let (mute_rect, mute_resp) = ui.allocate_exact_size(egui::vec2(step_width - 2.0, 20.0), egui::Sense::click());
+                            // Mute logic: check bounds just in case
+                            if i < lane.muted.len() {
+                                let is_muted = lane.muted[i];
+                                
+                                // Draw Background (Dark Area)
+                                let bg_color = if is_muted { egui::Color32::from_gray(10) } else { egui::Color32::from_gray(20) };
+                                ui.painter().rect_filled(mute_rect, 2.0, bg_color);
+                                
+                                // Draw Red X if muted
+                                if is_muted {
+                                    let stroke = egui::Stroke::new(2.0, egui::Color32::RED);
+                                    let margin = 4.0;
+                                    let r = mute_rect.shrink(margin);
+                                    ui.painter().line_segment([r.min, r.max], stroke);
+                                    ui.painter().line_segment([egui::pos2(r.max.x, r.min.y), egui::pos2(r.min.x, r.max.y)], stroke);
+                                }
+                                
+                                if mute_resp.clicked() {
+                                    lane.muted[i] = !lane.muted[i];
+                                    changed = true;
+                                }
+                            }
+                        }
+
                         // Label
                         if is_pitch {
                             // Note Name
@@ -200,12 +235,19 @@ impl SequencerUI {
         lane: &mut SequencerLane<f32>, 
         label: &str, 
         range: std::ops::RangeInclusive<f32>,
+        has_mute: bool,
         current_beat: Option<f64>
     ) -> bool {
          // Auto-resize
         let mut changed = if lane.loop_end as usize > lane.steps.len() { true } else { false };
         if changed {
              lane.steps.resize(lane.loop_end as usize, 0.5);
+             lane.muted.resize(lane.loop_end as usize, false);
+        }
+        
+        // Sync muted if needed
+        if lane.muted.len() < lane.steps.len() {
+             lane.muted.resize(lane.steps.len(), false);
         }
 
          ui.horizontal(|ui| {
@@ -316,6 +358,31 @@ impl SequencerUI {
                                        *val = new_val;
                                        changed = true;
                                    }
+                                }
+                            }
+                        }
+                        
+                         // MUTE BUTTON (Added here for f32)
+                        if has_mute {
+                            let (mute_rect, mute_resp) = ui.allocate_exact_size(egui::vec2(step_width - 2.0, 20.0), egui::Sense::click());
+                            
+                            if i < lane.muted.len() {
+                                let is_muted = lane.muted[i];
+                                
+                                let bg_color = if is_muted { egui::Color32::from_gray(10) } else { egui::Color32::from_gray(20) };
+                                ui.painter().rect_filled(mute_rect, 2.0, bg_color);
+                                
+                                if is_muted {
+                                    let stroke = egui::Stroke::new(2.0, egui::Color32::RED);
+                                    let margin = 4.0;
+                                    let r = mute_rect.shrink(margin);
+                                    ui.painter().line_segment([r.min, r.max], stroke);
+                                    ui.painter().line_segment([egui::pos2(r.max.x, r.min.y), egui::pos2(r.min.x, r.max.y)], stroke);
+                                }
+                                
+                                if mute_resp.clicked() {
+                                    lane.muted[i] = !lane.muted[i];
+                                    changed = true;
                                 }
                             }
                         }

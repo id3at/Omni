@@ -59,6 +59,8 @@ impl Default for SequencerDirection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SequencerLane<T> {
     pub steps: Vec<T>,
+    #[serde(default)]
+    pub muted: Vec<bool>,
     pub loop_start: u32,
     pub loop_end: u32,    // Exclusive? or Inclusive? Let's say length-based or index. Thesys uses "Loop Bar". Let's use start/length mostly? Or start/end indices. Thesys Docs: "beginning and start steps". Let's use indices.
     pub direction: SequencerDirection,
@@ -69,6 +71,7 @@ impl<T: Default + Clone> SequencerLane<T> {
     pub fn new(size: usize, default_val: T) -> Self {
         Self {
             steps: vec![default_val; size],
+            muted: vec![false; size],
             loop_start: 0,
             loop_end: size as u32,
             direction: SequencerDirection::default(),
@@ -81,6 +84,7 @@ impl<T: Default + Clone> Default for SequencerLane<T> {
     fn default() -> Self {
         Self {
             steps: Vec::new(),
+            muted: Vec::new(),
             loop_start: 0,
             loop_end: 16,
             direction: SequencerDirection::default(),
@@ -97,10 +101,17 @@ impl<T: Clone> SequencerLane<T> {
         let end = self.loop_end as usize;
         
         if end > self.steps.len() { return; }
+        if self.muted.len() < self.steps.len() { self.muted.resize(self.steps.len(), false); }
+
         if start >= end { return; }
         
         let slice = &mut self.steps[start..end];
         slice.rotate_left(1);
+        
+        if end <= self.muted.len() {
+             let slice_muted = &mut self.muted[start..end];
+             slice_muted.rotate_left(1);
+        }
     }
     
     pub fn shift_right(&mut self) {
@@ -110,10 +121,17 @@ impl<T: Clone> SequencerLane<T> {
         let end = self.loop_end as usize;
         
         if end > self.steps.len() { return; }
+        if self.muted.len() < self.steps.len() { self.muted.resize(self.steps.len(), false); }
+
         if start >= end { return; }
         
         let slice = &mut self.steps[start..end];
         slice.rotate_right(1);
+        
+        if end <= self.muted.len() {
+             let slice_muted = &mut self.muted[start..end];
+             slice_muted.rotate_right(1);
+        }
     }
 }
 
