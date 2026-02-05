@@ -324,7 +324,7 @@ impl eframe::App for OmniApp {
         // Note Expressions Panel (Docked at Bottom)
         if self.selected_track < self.tracks.len() {
             let track = &mut self.tracks[self.selected_track];
-            if let Some(active_idx) = track.active_clip {
+            if let Some(_active_idx) = track.active_clip {
                  // We use selected_clip logic for UI?
                  // In piano roll logic (Line 717), we use self.selected_clip?
                  // Line 715: if self.selected_clip < track.clips.len() { let clip = ... }

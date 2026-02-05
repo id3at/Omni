@@ -114,7 +114,7 @@ impl SequencerUI {
         
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
-                for (i, val) in lane.steps.iter_mut().enumerate() {
+                for (i, val) in lane.steps.iter_mut().enumerate().take(lane.loop_end as usize) {
                     let is_in_loop = (i as u32) >= lane.loop_start && (i as u32) < lane.loop_end;
                     
                     let mut is_active = false;
@@ -143,7 +143,7 @@ impl SequencerUI {
                         let max = *range.end() as f32;
                         let norm = (*val as f32 - min) / (max - min);
                         
-                        let (rect, response) = ui.allocate_exact_size(egui::vec2(step_width - 2.0, step_height), egui::Sense::click_and_drag());
+                        let (rect, _response) = ui.allocate_exact_size(egui::vec2(step_width - 2.0, step_height), egui::Sense::click_and_drag());
                         
                         // Background
                         ui.painter().rect_filled(rect, 2.0, egui::Color32::from_gray(30));
@@ -260,7 +260,7 @@ impl SequencerUI {
         
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
-                for (i, val) in lane.steps.iter_mut().enumerate() {
+                for (i, val) in lane.steps.iter_mut().enumerate().take(lane.loop_end as usize) {
                     let is_in_loop = (i as u32) >= lane.loop_start && (i as u32) < lane.loop_end;
                     
                     let mut is_active = false;
@@ -289,7 +289,7 @@ impl SequencerUI {
                         let max = *range.end();
                         let norm = (*val - min) / (max - min);
                         
-                        let (rect, response) = ui.allocate_exact_size(egui::vec2(step_width - 2.0, step_height), egui::Sense::click_and_drag());
+                        let (rect, _response) = ui.allocate_exact_size(egui::vec2(step_width - 2.0, step_height), egui::Sense::click_and_drag());
                         
                         // Background
                         ui.painter().rect_filled(rect, 2.0, egui::Color32::from_gray(30));
