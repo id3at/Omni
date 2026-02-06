@@ -40,9 +40,7 @@ pub enum HostCommand {
         shmem_config: ShmemConfig,
     },
     /// Load a plugin from a given path
-    LoadPlugin {
-        path: String,
-    },
+    LoadPlugin { path: String, sample_rate: f64 },
     /// Request the plugin to process audio with optional MIDI events
     ProcessFrame {
         count: u32,

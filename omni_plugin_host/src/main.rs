@@ -30,7 +30,7 @@ use std::panic;
 enum CustomEvent {
     OpenEditor,
     Initialize(Uuid, omni_shared::ShmemConfig),
-    LoadPlugin(String),
+    LoadPlugin(String, f64),
     Shutdown, 
 }
 
@@ -122,10 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = event_loop_proxy.send_event(CustomEvent::Initialize(plugin_id, shmem_config));
                     // Note: We don't send Initialized event here; main thread will do it.
                 }
-                HostCommand::LoadPlugin { path } => {
+                HostCommand::LoadPlugin { path, sample_rate } => {
                     let mut f = log_file.lock().unwrap();
-                    let _ = writeln!(f, "[CMD] LoadPlugin (Dispatching to Main Thread): {}", path);
-                    let _ = event_loop_proxy.send_event(CustomEvent::LoadPlugin(path));
+                    let _ = writeln!(f, "[CMD] LoadPlugin (Dispatching to Main Thread): {} @ {}Hz", path, sample_rate);
+                    let _ = event_loop_proxy.send_event(CustomEvent::LoadPlugin(path, sample_rate));
                     // Main thread sends reply.
                 }
                 HostCommand::ProcessFrame { count } => {
@@ -142,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let transport = clap_wrapper::TransportInfo::default();
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
-                                    p.process_audio(slice, 44100.0, &[], &[], &[], header, &transport);
+                                    p.process_audio(slice, &[], &[], &[], header, &transport);
                                 } else {
                                      // Silence or passthrough (here we assume silence if no plugin)
                                      for s in slice.iter_mut() { *s = 0.0; }
@@ -166,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let transport = clap_wrapper::TransportInfo::default();
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
-                                    p.process_audio(slice, 44100.0, &events, &[], &[], header, &transport);
+                                    p.process_audio(slice, &events, &[], &[], header, &transport);
                                 }
                             }
                          }
@@ -303,7 +303,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         let guard = plugin_for_audio.read().unwrap();
                         if let Some(ref p) = *guard {
-                            p.process_audio(slice, 44100.0, midi_slice, param_slice, expr_slice, header, &transport);
+                            p.process_audio(slice, midi_slice, param_slice, expr_slice, header, &transport);
                         } else {
                             // Passthrough/Silence
                              for s in slice.iter_mut() { *s = 0.0; }
@@ -385,10 +385,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            Event::UserEvent(CustomEvent::LoadPlugin(path)) => {
+            Event::UserEvent(CustomEvent::LoadPlugin(path, sample_rate)) => {
                  let mut f = log_file.lock().unwrap();
-                 let _ = writeln!(f, "[Main] Processing LoadPlugin: {}", path);
-                 match unsafe { ClapPlugin::load(&path) } {
+                 let _ = writeln!(f, "[Main] Processing LoadPlugin: {} @ {}Hz", path, sample_rate);
+                 match unsafe { ClapPlugin::load(&path, sample_rate) } {
                     Ok(p) => {
                         let mut guard = plugin.write().unwrap();
                         *guard = Some(p);

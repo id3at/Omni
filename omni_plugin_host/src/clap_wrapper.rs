@@ -79,6 +79,9 @@ pub struct ClapPlugin {
     // Interior Mutability for Audio Thread exclusive access
     // This Mutex is ONLY locked by process_audio, so it is uncontended by GUI
     audio_buffers: Mutex<AudioBuffers>,
+    
+    // Sample Rate for process
+    pub sample_rate: f64,
 }
 
 unsafe impl Send for ClapPlugin {}
@@ -198,7 +201,7 @@ unsafe extern "C" fn output_events_try_push(list: *const clap_output_events, eve
 }
 
 impl ClapPlugin {
-    pub unsafe fn load(path: &str) -> Result<Self> {
+    pub unsafe fn load(path: &str, sample_rate: f64) -> Result<Self> {
         let lib_unix = UnixLibrary::open(Some(path), libc::RTLD_NOW | libc::RTLD_LOCAL)?;
         let library = Arc::new(Library::from(lib_unix));
         
@@ -283,7 +286,7 @@ impl ClapPlugin {
         };
 
         if let Some(activate) = (*plugin).activate {
-             if !activate(plugin, 44100.0, 32, 4096) {
+             if !activate(plugin, sample_rate, 32, 4096) {
                  eprintln!("[CLAP] Warning: activate failed");
              }
         }
@@ -310,13 +313,13 @@ impl ClapPlugin {
                 expression_events: Vec::with_capacity(128),
                 param_events: Vec::with_capacity(32),
             }),
+            sample_rate,
         })
     }
 
     pub unsafe fn process_audio(
         &self, 
         output_buffer: &mut [f32], 
-        _sample_rate: f32,
         midi_events: &[MidiNoteEvent],
         param_events: &[omni_shared::ParameterEvent],
         expression_events: &[omni_shared::ExpressionEvent],

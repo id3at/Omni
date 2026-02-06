@@ -281,7 +281,7 @@ impl AudioEngine {
                                              // Re-instantiate plugins or gain nodes
                                              let plugin_path = if track.plugin_path.is_empty() { None } else { Some(track.plugin_path.as_str()) };
                                              let node: Box<dyn AudioNode> = if let Some(path) = plugin_path {
-                                                 match PluginNode::new(path) {
+                                                 match PluginNode::new(path, sample_rate as f64) {
                                                      Ok(n) => Box::new(n),
                                                      Err(e) => {
                                                          eprintln!("Error loading plugin: {}", e);
@@ -375,7 +375,7 @@ impl AudioEngine {
                             }
                             EngineCommand::AddTrack { plugin_path } => {
                                 let node: Box<dyn AudioNode> = if let Some(ref path) = plugin_path {
-                                     match PluginNode::new(path) {
+                                     match PluginNode::new(path, sample_rate as f64) {
                                          Ok(n) => Box::new(n),
                                          Err(e) => {
                                              eprintln!("Error loading plugin: {}", e);
@@ -396,7 +396,7 @@ impl AudioEngine {
                             }
                             EngineCommand::LoadPluginToTrack { track_index, plugin_path } => {
                                  if let Some(&node_idx) = track_node_indices.get(track_index) {
-                                     match PluginNode::new(&plugin_path) {
+                                     match PluginNode::new(&plugin_path, sample_rate as f64) {
                                          Ok(node) => {
                                               if let Some(existing_node_ref) = graph.node_mut(node_idx) {
                                                   *existing_node_ref = Box::new(node);

@@ -15,6 +15,7 @@ pub struct PluginNode {
     plugin_path: String,
     shmem_config: omni_shared::ShmemConfig,
     param_cache: std::collections::HashMap<u32, f32>,
+    sample_rate: f64,
 }
 
 unsafe impl Sync for PluginNode {}
@@ -51,7 +52,7 @@ impl PluginNode {
         Err(anyhow::anyhow!("Could not find omni_plugin_host binary! Tried current dir, target/debug, and target/release."))
     }
 
-    pub fn new(plugin_path: &str) -> Result<Self, anyhow::Error> {
+    pub fn new(plugin_path: &str, sample_rate: f64) -> Result<Self, anyhow::Error> {
         // 1. Setup Shared Memory
         let shmem_config = omni_shared::ShmemConfig {
             os_id: format!("/omni_{}", uuid::Uuid::new_v4()),
@@ -105,7 +106,7 @@ impl PluginNode {
         }
         
         // 4. Load Plugin
-        let load_cmd = HostCommand::LoadPlugin { path: plugin_path.to_string() };
+        let load_cmd = HostCommand::LoadPlugin { path: plugin_path.to_string(), sample_rate };
         let serialized_load = bincode::serialize(&load_cmd)?;
         writeln!(stdin, "{}", BASE64.encode(serialized_load))?;
 
@@ -121,6 +122,7 @@ impl PluginNode {
             plugin_path: plugin_path.to_string(),
             shmem_config: shmem_config,
             param_cache: std::collections::HashMap::new(),
+            sample_rate,
         })
     }
 
@@ -154,7 +156,7 @@ impl PluginNode {
             reader.read_line(&mut line)?; 
 
             // 3. Load Plugin again
-            let load_cmd = HostCommand::LoadPlugin { path: self.plugin_path.clone() };
+            let load_cmd = HostCommand::LoadPlugin { path: self.plugin_path.clone(), sample_rate: self.sample_rate };
             let serialized_load = bincode::serialize(&load_cmd)?;
             writeln!(stdin, "{}", BASE64.encode(serialized_load))?;
             reader.read_line(&mut line)?; // Wait for PluginLoaded
