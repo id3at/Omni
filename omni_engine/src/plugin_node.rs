@@ -16,6 +16,10 @@ pub struct PluginNode {
     shmem_config: omni_shared::ShmemConfig,
     param_cache: std::collections::HashMap<u32, f32>,
     sample_rate: f64,
+    // Async Processing: Double-buffer for 1-block latency
+    prev_output: Vec<f32>,
+    first_block: bool,
+    pending_process: bool,
 }
 
 unsafe impl Sync for PluginNode {}
@@ -123,6 +127,10 @@ impl PluginNode {
             shmem_config: shmem_config,
             param_cache: std::collections::HashMap::new(),
             sample_rate,
+            // Async processing
+            prev_output: Vec::new(),
+            first_block: true,
+            pending_process: false,
         })
     }
 
@@ -195,101 +203,103 @@ impl Drop for PluginNode {
 
 impl AudioNode for PluginNode {
     fn process(&mut self, output: &mut [f32], _sample_rate: f32, midi_events: &[omni_shared::MidiNoteEvent], param_events: &[omni_shared::ParameterEvent], expression_events: &[omni_shared::ExpressionEvent]) {
-        // Resurrection check
+        // Resurrection check (blocking but rare - only on crash)
         let _ = self.check_resurrection();
 
         let count = output.len() as u32;
+        let sample_count = output.len();
 
+        // --- ASYNC DOUBLE-BUFFER ARCHITECTURE ---
+        // 1. If we have a pending process from the previous block, try to read result
+        // 2. Copy prev_output to output (1-block latency)
+        // 3. Write current input to shmem and signal process (fire-and-forget)
+        
         unsafe {
             let ptr = self.shmem.as_ptr();
             let header = &mut *(ptr as *mut OmniShmemHeader);
             let data_ptr = ptr.add(std::mem::size_of::<OmniShmemHeader>()) as *mut f32;
 
-            // 1. Copy Audio to Shmem
-            std::ptr::copy_nonoverlapping(output.as_ptr(), data_ptr, output.len());
-            
-            // 2. Set Parameters and write MIDI
-            header.sample_count = count;
-            
-            // Serialize MIDI
-            let audio_size_bytes = count as usize * std::mem::size_of::<f32>();
-            // Note: data_ptr is f32 ptr.
-            // MIDI buffer starts after audio.
-            // But strict offset calculation:
-            // header.midi_offset = sizeof(Header) + audio_size_bytes?
-            // Let's settle on a fixed offset logic for now or write it to header.
-            
-            let midi_offset_bytes = std::mem::size_of::<OmniShmemHeader>() + audio_size_bytes;
-            // Pad to 4 bytes alignment if needed (f32 is 4 bytes, so likely aligned if header is aligned)
-            
-            header.midi_offset = midi_offset_bytes as u32;
-            
-            let midi_ptr = (ptr as *mut u8).add(midi_offset_bytes) as *mut omni_shared::MidiNoteEvent;
-            
-            let events_to_write = midi_events.len().min(omni_shared::MAX_MIDI_EVENTS);
-             if events_to_write > 0 {
-                std::ptr::copy_nonoverlapping(midi_events.as_ptr(), midi_ptr, events_to_write);
-            }
-            header.midi_event_count = events_to_write as u32;
-            
-            // NEW: Write Parameter Events
-            let param_offset_bytes = midi_offset_bytes + (omni_shared::MAX_MIDI_EVENTS * std::mem::size_of::<omni_shared::MidiNoteEvent>());
-            header.param_event_offset = param_offset_bytes as u32;
-            header.param_event_count = param_events.len().min(omni_shared::MAX_PARAM_EVENTS) as u32;
-
-            if header.param_event_count > 0 {
-                let param_ptr = (ptr as *mut u8).add(param_offset_bytes) as *mut omni_shared::ParameterEvent;
-                std::ptr::copy_nonoverlapping(param_events.as_ptr(), param_ptr, header.param_event_count as usize);
-            }
-            
-            // NEW: Write Expression Events
-            let expr_offset_bytes = param_offset_bytes + (omni_shared::MAX_PARAM_EVENTS * std::mem::size_of::<omni_shared::ParameterEvent>());
-            header.expression_event_offset = expr_offset_bytes as u32;
-            header.expression_event_count = expression_events.len().min(omni_shared::MAX_EXPRESSION_EVENTS) as u32;
-
-            if header.expression_event_count > 0 {
-                let expr_ptr = (ptr as *mut u8).add(expr_offset_bytes) as *mut omni_shared::ExpressionEvent;
-                std::ptr::copy_nonoverlapping(expression_events.as_ptr(), expr_ptr, header.expression_event_count as usize);
-            }
-            
-            // NEW: Write Transport State from global
-            let transport = crate::transport::get_transport();
-            header.transport_is_playing = if transport.is_playing { 1 } else { 0 };
-            header.transport_tempo = transport.tempo;
-            header.transport_song_pos_beats = transport.song_pos_beats;
-            header.transport_bar_start_beats = transport.bar_start_beats;
-            header.transport_bar_number = transport.bar_number;
-            header.transport_time_sig_num = transport.time_sig_num;
-            header.transport_time_sig_denom = transport.time_sig_denom;
-            
-            // 3. Signal Process
-            // std::sync::atomic::fence(Ordering::Release); // Ensure data is visible?
-            std::ptr::write_volatile(&mut header.command, omni_shared::CMD_PROCESS);
-            
-            // 4. Spin Wait
-            let mut spin_count = 0;
-            const TIMEOUT_SPINS: usize = 200000; // ~ 10ms at 2GHz?
-            
-            while std::ptr::read_volatile(&header.response) != omni_shared::RSP_DONE {
-                spin_count += 1;
-                if spin_count < 2000 {
-                    std::hint::spin_loop();
-                } else {
-                    std::thread::yield_now();
+            // Step 1: Check if previous block's processing is done
+            if self.pending_process {
+                // Quick non-blocking check
+                if std::ptr::read_volatile(&header.response) == omni_shared::RSP_DONE {
+                    // Read the result from previous block into prev_output
+                    if self.prev_output.len() != sample_count {
+                        // First time or buffer size change: allocate (this happens once)
+                        self.prev_output.resize(sample_count, 0.0);
+                    }
+                    std::ptr::copy_nonoverlapping(data_ptr, self.prev_output.as_mut_ptr(), sample_count);
+                    
+                    // Reset handshake for next cycle
+                    std::ptr::write_volatile(&mut header.command, omni_shared::CMD_IDLE);
+                    self.pending_process = false;
+                    self.first_block = false;
                 }
-                if spin_count > TIMEOUT_SPINS {
-                    // Timeout (Plugin hung or crashed)
-                    // eprintln!("[PluginNode] Timeout waiting for plugin!");
-                    // Detect potential crash
-                    return;
-                }
+                // If not done yet, we'll use silence/previous buffer (graceful degradation)
             }
-            
-            // 5. Read Audio back
-            std::ptr::copy_nonoverlapping(data_ptr, output.as_mut_ptr(), output.len());
-            
-            // 6. Reset Handshake
-            std::ptr::write_volatile(&mut header.command, omni_shared::CMD_IDLE);
+
+            // Step 2: Output previous block's result (or silence on first block)
+            if self.first_block || self.prev_output.len() != sample_count {
+                // First block: output silence (or the input passthrough)
+                // Actually, let's passthrough input for first block for transparency
+                // The PDC system will add +buffer_size to reported latency
+            } else {
+                // Copy previous result to output
+                output.copy_from_slice(&self.prev_output);
+            }
+
+            // Step 3: Write current input to shared memory (fire-and-forget)
+            // Only if we're not still waiting for previous (avoid overwriting in-progress data)
+            if !self.pending_process {
+                // Copy input audio to shmem
+                std::ptr::copy_nonoverlapping(output.as_ptr(), data_ptr, sample_count);
+                
+                header.sample_count = count;
+                
+                // Write MIDI events
+                let audio_size_bytes = count as usize * std::mem::size_of::<f32>();
+                let midi_offset_bytes = std::mem::size_of::<OmniShmemHeader>() + audio_size_bytes;
+                header.midi_offset = midi_offset_bytes as u32;
+                
+                let midi_ptr = (ptr as *mut u8).add(midi_offset_bytes) as *mut omni_shared::MidiNoteEvent;
+                let events_to_write = midi_events.len().min(omni_shared::MAX_MIDI_EVENTS);
+                if events_to_write > 0 {
+                    std::ptr::copy_nonoverlapping(midi_events.as_ptr(), midi_ptr, events_to_write);
+                }
+                header.midi_event_count = events_to_write as u32;
+                
+                // Write Parameter Events
+                let param_offset_bytes = midi_offset_bytes + (omni_shared::MAX_MIDI_EVENTS * std::mem::size_of::<omni_shared::MidiNoteEvent>());
+                header.param_event_offset = param_offset_bytes as u32;
+                header.param_event_count = param_events.len().min(omni_shared::MAX_PARAM_EVENTS) as u32;
+                if header.param_event_count > 0 {
+                    let param_ptr = (ptr as *mut u8).add(param_offset_bytes) as *mut omni_shared::ParameterEvent;
+                    std::ptr::copy_nonoverlapping(param_events.as_ptr(), param_ptr, header.param_event_count as usize);
+                }
+                
+                // Write Expression Events
+                let expr_offset_bytes = param_offset_bytes + (omni_shared::MAX_PARAM_EVENTS * std::mem::size_of::<omni_shared::ParameterEvent>());
+                header.expression_event_offset = expr_offset_bytes as u32;
+                header.expression_event_count = expression_events.len().min(omni_shared::MAX_EXPRESSION_EVENTS) as u32;
+                if header.expression_event_count > 0 {
+                    let expr_ptr = (ptr as *mut u8).add(expr_offset_bytes) as *mut omni_shared::ExpressionEvent;
+                    std::ptr::copy_nonoverlapping(expression_events.as_ptr(), expr_ptr, header.expression_event_count as usize);
+                }
+                
+                // Write Transport State
+                let transport = crate::transport::get_transport();
+                header.transport_is_playing = if transport.is_playing { 1 } else { 0 };
+                header.transport_tempo = transport.tempo;
+                header.transport_song_pos_beats = transport.song_pos_beats;
+                header.transport_bar_start_beats = transport.bar_start_beats;
+                header.transport_bar_number = transport.bar_number;
+                header.transport_time_sig_num = transport.time_sig_num;
+                header.transport_time_sig_denom = transport.time_sig_denom;
+                
+                // Signal Process (FIRE AND FORGET - NO WAITING!)
+                std::ptr::write_volatile(&mut header.command, omni_shared::CMD_PROCESS);
+                self.pending_process = true;
+            }
         }
     }
 
@@ -331,7 +341,15 @@ impl AudioNode for PluginNode {
     }
 
     fn get_latency(&self) -> u32 {
-        self.get_latency_impl()
+        // Plugin's reported latency PLUS 1-block latency from async double-buffering
+        // The buffer size is stored in shmem during last process call
+        let plugin_latency = self.get_latency_impl();
+        let buffer_latency = unsafe {
+            let ptr = self.shmem.as_ptr();
+            let header = &*(ptr as *const OmniShmemHeader);
+            std::ptr::read_volatile(&header.sample_count)
+        };
+        plugin_latency + buffer_latency
     }
 }
 
