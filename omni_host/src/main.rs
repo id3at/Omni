@@ -4,8 +4,11 @@ use crossbeam_channel::{unbounded, Sender, Receiver};
 use eframe::egui;
 use omni_shared::project::{Project, StepSequencerData};
 mod sequencer_ui;
-use sequencer_ui::SequencerUI;
 mod arrangement_ui;
+mod project_io; // Added
+use project_io::{load_project_file, save_project_file};
+
+use sequencer_ui::SequencerUI;
 use arrangement_ui::ArrangementUI;
 
 #[derive(Clone)]
@@ -207,78 +210,57 @@ impl OmniApp {
     }
 
     fn load_project(&mut self, path: String) {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(shared_proj) = serde_json::from_str::<Project>(&content) {
-                if let Some(ref engine) = self.engine {
-                    // Pre-load nodes (Blocking UI, but Safe for Audio)
-                    let mut nodes: Vec<Box<dyn omni_engine::nodes::AudioNode>> = Vec::new();
-                    let sample_rate = engine.get_sample_rate() as f64;
-                    eprintln!("[UI] Loading Project Plugins...");
+        if let Some(ref engine) = self.engine {
+            if let Ok((shared_proj, nodes)) = load_project_file(&path, engine.get_sample_rate() as f64) {
+                // Send entire project state to engine with nodes
+                // This replaces ResetGraph + manual rebuild
+                let _ = self.messenger.send(EngineCommand::LoadProjectState(shared_proj.clone(), nodes));
                     
-                    for track in &shared_proj.tracks {
-                         if !track.plugin_path.is_empty() {
-                             match omni_engine::plugin_node::PluginNode::new(&track.plugin_path, sample_rate) {
-                                 Ok(n) => nodes.push(Box::new(n)),
-                                 Err(e) => {
-                                     eprintln!("[UI] Plugin Load Error: {}. Using GainNode.", e);
-                                     nodes.push(Box::new(omni_engine::nodes::GainNode::new(1.0)));
-                                 }
-                             }
-                         } else {
-                             nodes.push(Box::new(omni_engine::nodes::GainNode::new(1.0)));
-                         }
+                // 2. Clear local UI state (Sync UI to Project)
+                self.tracks.clear();
+                self.bpm = shared_proj.bpm;
+                let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
+                self.selected_track = 0;
+                self.selected_clip = 0;
+                self.param_states.clear();
+                    
+                // 3. Rebuild UI Tracks from Shared Project
+                for (t_idx, shared_track) in shared_proj.tracks.iter().enumerate() {
+                    let mut local_track = TrackData {
+                        name: shared_track.name.clone(),
+                        volume: shared_track.volume,
+                        pan: shared_track.pan,
+                        mute: shared_track.mute,
+                        active_clip: shared_track.active_clip_index,
+                        arrangement: shared_track.arrangement.clone(),
+                        valid_notes: None, // Will be updated if plugin
+                        ..Default::default()
+                    };
+                        
+                    // Restore Clips
+                    for (c_idx, shared_clip) in shared_track.clips.iter().enumerate() {
+                        if c_idx < local_track.clips.len() {
+                            local_track.clips[c_idx].notes = shared_clip.notes.clone();
+                            local_track.clips[c_idx].length = shared_clip.length;
+                            local_track.clips[c_idx].use_sequencer = shared_clip.use_sequencer;
+                            local_track.clips[c_idx].step_sequencer = shared_clip.step_sequencer.clone();
+                        }
                     }
+                    self.tracks.push(local_track);
 
-                    // Send entire project state to engine with nodes
-                    // This replaces ResetGraph + manual rebuild
-                    let _ = self.messenger.send(EngineCommand::LoadProjectState(shared_proj.clone(), nodes));
-                     
-                     // 2. Clear local UI state (Sync UI to Project)
-                     self.tracks.clear();
-                     self.bpm = shared_proj.bpm;
-                     let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
-                     self.selected_track = 0;
-                     self.selected_clip = 0;
-                     self.param_states.clear();
-                     
-                     // 3. Rebuild UI Tracks from Shared Project
-                     for (t_idx, shared_track) in shared_proj.tracks.iter().enumerate() {
-                         let mut local_track = TrackData {
-                             name: shared_track.name.clone(),
-                             volume: shared_track.volume,
-                             pan: shared_track.pan,
-                             mute: shared_track.mute,
-                             active_clip: shared_track.active_clip_index,
-                             arrangement: shared_track.arrangement.clone(),
-                             valid_notes: None, // Will be updated if plugin
-                             ..Default::default()
-                         };
-                         
-                         // Restore Clips
-                         for (c_idx, shared_clip) in shared_track.clips.iter().enumerate() {
-                             if c_idx < local_track.clips.len() {
-                                 local_track.clips[c_idx].notes = shared_clip.notes.clone();
-                                 local_track.clips[c_idx].length = shared_clip.length;
-                                 local_track.clips[c_idx].use_sequencer = shared_clip.use_sequencer;
-                                 local_track.clips[c_idx].step_sequencer = shared_clip.step_sequencer.clone();
-                             }
-                         }
-                         self.tracks.push(local_track);
-
-                         // Restore Parameters (Local State)
-                         for (&p_id, &val) in &shared_track.parameters {
-                             self.param_states.insert(p_id, val);
-                         }
-                         
-                         // Note Names query if plugin
-                         if !shared_track.plugin_path.is_empty() {
-                             let (tx, rx) = crossbeam_channel::bounded(1);
-                             self.pending_note_names_rx = Some((t_idx, rx));
-                             let _ = self.messenger.send(EngineCommand::GetNoteNames { track_index: t_idx, response_tx: tx });
-                         }
-                     }
-                     eprintln!("[UI] Loaded project from: {}", path);
+                    // Restore Parameters (Local State)
+                    for (&p_id, &val) in &shared_track.parameters {
+                        self.param_states.insert(p_id, val);
+                    }
+                        
+                    // Note Names query if plugin
+                    if !shared_track.plugin_path.is_empty() {
+                        let (tx, rx) = crossbeam_channel::bounded(1);
+                        self.pending_note_names_rx = Some((t_idx, rx));
+                        let _ = self.messenger.send(EngineCommand::GetNoteNames { track_index: t_idx, response_tx: tx });
+                    }
                 }
+                eprintln!("[UI] Loaded project from: {}", path);
             }
         }
     }
@@ -594,13 +576,12 @@ impl eframe::App for OmniApp {
                             // Wait for state (Blocking UI is acceptable for Save Dialog context, or use Async/Defer)
                             // For MVP Refactor, blocking 1ms is fine.
                             if let Ok(project_state) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                                if let Ok(json) = serde_json::to_string_pretty(&project_state) {
-                                    if let Ok(mut file) = std::fs::File::create(path_str) {
-                                        use std::io::Write;
-                                        let _ = file.write_all(json.as_bytes());
+                                    if let Err(e) = save_project_file(&project_state, path_str) {
+                                        eprintln!("[UI] Error saving project: {}", e);
+                                    } else {
                                         eprintln!("[UI] Saved project to: {}", path_str);
                                     }
-                                }
+
                             } else {
                                 eprintln!("[UI] Error: Timeout getting project state from engine");
                             }
