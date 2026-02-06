@@ -333,6 +333,14 @@ impl AudioNode for PluginNode {
     fn get_latency(&self) -> u32 {
         self.get_latency_impl()
     }
+
+    fn get_state(&mut self) -> Result<Vec<u8>, anyhow::Error> {
+        self.get_state_impl()
+    }
+
+    fn set_state(&mut self, data: Vec<u8>) -> Result<(), anyhow::Error> {
+        self.set_state_impl(data)
+    }
 }
 
 impl PluginNode {
