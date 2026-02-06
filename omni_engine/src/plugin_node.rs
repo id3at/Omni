@@ -294,16 +294,12 @@ impl AudioNode for PluginNode {
     }
 
     fn set_param(&mut self, id: u32, value: f32) {
-        // Cache the value for resurrection
+        // Cache the value for resurrection (and initial state sync)
         self.param_cache.insert(id, value);
 
-        if let Some(stdin) = &mut self.stdin {
-            let cmd = HostCommand::SetParameter { param_id: id, value };
-            if let Ok(serialized) = bincode::serialize(&cmd) {
-                 let _ = writeln!(stdin, "{}", BASE64.encode(serialized));
-                 let _ = stdin.flush();
-            }
-        }
+        // NOTE: We do NOT write to Stdin here anymore. 
+        // Real-time parameter changes are handled via ParameterEvents in the process() call
+        // passed from the AudioEngine.
     }
 
     fn get_plugin_params(&mut self) -> Vec<omni_shared::ParamInfo> {

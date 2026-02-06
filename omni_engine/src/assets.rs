@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::io::BufReader;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AudioAsset {
@@ -13,6 +12,7 @@ pub struct AudioAsset {
     pub original_bpm: Option<f32>, // Metadata for stretching
 }
 
+#[derive(Clone)]
 pub struct AudioPool {
     assets: HashMap<u32, AudioAsset>,
     next_id: u32,

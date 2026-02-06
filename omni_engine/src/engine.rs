@@ -10,8 +10,10 @@ use omni_shared::project::{Project, Track};
 use omni_shared::MidiNoteEvent;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 // use petgraph::graph::NodeIndex;
-use std::sync::{Arc, Mutex}; // Added Mutex for AudioPool
+use std::sync::Arc;
 use crate::nodes::AudioNode;
+use arc_swap::ArcSwap;
+
 
 
 pub struct AudioEngine {
@@ -23,7 +25,8 @@ pub struct AudioEngine {
     _sequencer: Sequencer,
     current_step: Arc<AtomicU32>,
     pub sample_rate: u32,
-    pub audio_pool: Arc<Mutex<AudioPool>>,
+    pub audio_pool: Arc<ArcSwap<AudioPool>>,
+    pub drop_tx: Sender<Box<dyn AudioNode>>, // Off-thread dropping
 }
 
 
@@ -32,7 +35,7 @@ pub struct AudioEngine {
 // EngineCommand moved to commands.rs
 
 impl AudioEngine {
-    pub fn new(command_rx: Receiver<EngineCommand>) -> Result<Self, anyhow::Error> {
+    pub fn new(command_rx: Receiver<EngineCommand>, drop_tx: Sender<Box<dyn AudioNode>>) -> Result<Self, anyhow::Error> {
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or(anyhow::anyhow!("No output device available"))?;
         let config = device.default_output_config()?;
@@ -67,7 +70,7 @@ impl AudioEngine {
         let current_step_callback = current_step.clone();
         
         // Audio Pool
-        let audio_pool = Arc::new(Mutex::new(AudioPool::new()));
+        let audio_pool = Arc::new(ArcSwap::from_pointee(AudioPool::new()));
         let pool_for_callback = audio_pool.clone(); // Clone for audio thread
 
         // Owned State for Audio Thread
@@ -97,6 +100,11 @@ impl AudioEngine {
         let mut track_delays: Vec<crate::delay::DelayLine> = Vec::new();
         
         let mut crossfade: f32 = 0.0; // 0.0 = Session, 1.0 = Arrangement
+        
+        // Local buffer for parameter events to persist across command loop
+        // (Since audio_buffers.prepare_buffers clears the main event vector)
+        let mut local_param_events: Vec<Vec<omni_shared::ParameterEvent>> = vec![vec![]; max_tracks];
+        let drop_tx_struct = drop_tx.clone();
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => device.build_output_stream(
@@ -141,12 +149,17 @@ impl AudioEngine {
                                         if original_bpm > 0.0 {
                                             target_ratio = project_bpm / original_bpm;
                                             
-                                            // Process in AudioPool (Safe here)
-                                            if let Ok(mut pool) = pool_for_callback.lock() {
-                                                if let Ok(id) = pool.get_or_create_stretched(source_id, target_ratio) {
-                                                    result_id = Some(id);
-                                                    eprintln!("[Engine] Stretched Clip {}:{} (Source {}) Ratio {:.2} -> Asset {}", track_index, clip_index, source_id, target_ratio, id);
-                                                }
+                                            // RCU Update for Stretched Clip
+                                            // Clone current pool
+                                            let current_pool = pool_for_callback.load();
+                                            let mut new_pool = (**current_pool).clone();
+                                            
+                                            // Modify new pool
+                                            if let Ok(id) = new_pool.get_or_create_stretched(source_id, target_ratio) {
+                                                result_id = Some(id);
+                                                // Atomic Swap
+                                                pool_for_callback.store(Arc::new(new_pool));
+                                                eprintln!("[Engine] Stretched Clip {}:{} (Source {}) Ratio {:.2} -> Asset {}", track_index, clip_index, source_id, target_ratio, id);
                                             }
                                         }
                                     }
@@ -201,6 +214,11 @@ impl AudioEngine {
                                 
                                 let mut created_clips: Vec<(usize, omni_shared::project::ArrangementClip)> = Vec::new();
                                 
+                                // RCU: Load, Clone, Modify, Store
+                                // We do this ONCE for all new assets to avoid multiple atomic swaps
+                                let current_pool = pool_for_callback.load();
+                                let mut new_pool_map = (**current_pool).clone();
+                                
                                 // Finalize: Convert recording buffers to AudioAssets and ArrangementClips
                                 for (track_idx, rec_buf) in audio_buffers.recording_bufs.iter_mut().enumerate() {
                                     if !rec_buf.is_empty() {
@@ -208,46 +226,58 @@ impl AudioEngine {
                                         let asset_data = std::mem::take(rec_buf);
                                         let asset_len = asset_data.len();
                                         
-                                        if let Ok(mut pool) = pool_for_callback.lock() {
-                                            let asset_id = pool.add_asset_from_data(asset_data, sample_rate as f32);
-                                            eprintln!("[Engine] Track {} : Created Asset {} from {} samples", track_idx, asset_id, asset_len);
-                                            
-                                            // Create ArrangementClip
-                                            let clip = omni_shared::project::ArrangementClip {
-                                                source_id: asset_id,
-                                                start_time: omni_shared::project::Timestamp { samples: rec_start, fractional: 0.0 },
-                                                start_offset: omni_shared::project::Timestamp::default(),
-                                                length: omni_shared::project::Timestamp { samples: asset_len as u64, fractional: 0.0 },
-                                                name: format!("Recorded_{}", asset_id),
-                                                selected: false,
-                                                warp_markers: Vec::new(),
-                                                stretch: false,
-                                                stretch_ratio: 1.0,
-                                                original_bpm: project.bpm,
-                                                cached_id: None,
-                                            };
-                                            
-                                            // Add to internal project
-                                            if let Some(track) = project.tracks.get_mut(track_idx) {
-                                                track.arrangement.clips.push(clip.clone());
-                                                eprintln!("[Engine] Track {} : Created ArrangementClip starting at sample {}", track_idx, rec_start);
-                                            }
-                                            
-                                            // Collect for response
-                                            created_clips.push((track_idx, clip));
+                                        // Add to local clone of pool
+                                        let asset_id = new_pool_map.add_asset_from_data(asset_data, sample_rate as f32);
+                                        
+                                        eprintln!("[Engine] Track {} : Created Asset {} from {} samples", track_idx, asset_id, asset_len);
+                                        
+                                        // Create ArrangementClip
+                                        let clip = omni_shared::project::ArrangementClip {
+                                            source_id: asset_id,
+                                            start_time: omni_shared::project::Timestamp { samples: rec_start, fractional: 0.0 },
+                                            start_offset: omni_shared::project::Timestamp::default(),
+                                            length: omni_shared::project::Timestamp { samples: asset_len as u64, fractional: 0.0 },
+                                            name: format!("Recorded_{}", asset_id),
+                                            selected: false,
+                                            warp_markers: Vec::new(),
+                                            stretch: false,
+                                            stretch_ratio: 1.0,
+                                            original_bpm: project.bpm,
+                                            cached_id: None,
+                                        };
+                                        
+                                        // Add to internal project
+                                        if let Some(track) = project.tracks.get_mut(track_idx) {
+                                            track.arrangement.clips.push(clip.clone());
+                                            eprintln!("[Engine] Track {} : Created ArrangementClip starting at sample {}", track_idx, rec_start);
                                         }
+                                        
+                                        // Collect for response
+                                        created_clips.push((track_idx, clip));
                                     }
                                 }
+                                
+                                // Apply updates to pool atomically
+                                pool_for_callback.store(Arc::new(new_pool_map));
                                 
                                 // Send created clips back to UI
                                 let _ = response_tx.send(created_clips);
                             }
                             EngineCommand::SetPluginParam { track_index, id, value } => {
-                                // 1. Update Engine Node
+                                // 1. Update Engine Node (Cache Only)
                                 if let Some(&node_idx) = track_node_indices.get(track_index) {
                                     if let Some(node) = graph.node_mut(node_idx) {
-                                        node.set_param(id, value);
+                                        node.set_param(id, value); 
                                     }
+                                }
+                                
+                                // 2. Queue Event for Audio Processing (Lock-Free)
+                                if track_index < local_param_events.len() {
+                                    local_param_events[track_index].push(omni_shared::ParameterEvent {
+                                        param_id: id,
+                                        value: value as f64,
+                                        sample_offset: 0, // Apply at start of block
+                                    });
                                 }
                                 // 2. Update Project State
                                 if let Some(track) = project.tracks.get_mut(track_index) {
@@ -421,17 +451,25 @@ impl AudioEngine {
                                     
                                     // graph.remove_node performs a swap-remove, moving the last node to the removed index.
                                     // It returns the index of the node that was moved (if any).
-                                    if let Some(swapped_node_idx) = graph.remove_node(node_idx_to_remove) {
-                                        // We must find which track point to `swapped_node_idx` and update it to `node_idx_to_remove`
-                                        // because that node has moved to the recycled index.
-                                        for idx in track_node_indices.iter_mut() {
-                                            if *idx == swapped_node_idx {
-                                                *idx = node_idx_to_remove;
-                                                break;
+                                    // AND it should return the removed node weight so we can drop it off-thread.
+                                    
+                                    if let Some((moved_node_old_idx, removed_node)) = graph.remove_node_with_return(node_idx_to_remove) {
+                                         // Send removed node to drop thread
+                                         if let Some(node) = removed_node {
+                                             let _ = drop_tx.send(node);
+                                         }
+                                         
+                                         if let Some(swapped_old_idx) = moved_node_old_idx {
+                                             // Update index for swapped node
+                                            for idx in track_node_indices.iter_mut() {
+                                                if *idx == swapped_old_idx {
+                                                    *idx = node_idx_to_remove;
+                                                    break;
+                                                }
                                             }
-                                        }
+                                         }
                                     }
-
+                                    
                                     // 3. Remove Node Index Mapping
                                     track_node_indices.remove(track_index);
                                     
@@ -494,16 +532,29 @@ impl AudioEngine {
                             EngineCommand::AddAsset { name, data, source_sample_rate, response_tx } => {
                                 // Add directly to pool. No thread spawning, no I/O.
                                 // We take the lock briefly.
-                                if let Ok(mut pool) = pool_for_callback.lock() {
-                                    let id = pool.add_asset_from_data(data, source_sample_rate);
-                                    eprintln!("[Engine] Added Asset '{}' (ID: {})", name, id);
-                                    let _ = response_tx.send(Ok(id));
-                                } else {
-                                    let _ = response_tx.send(Err("Failed to lock pool".to_string()));
-                                }
+                                // Add directly to pool (RCU)
+                                // Clone, Modify, Store
+                                let current = pool_for_callback.load();
+                                let mut new_pool = (**current).clone();
+                                let id = new_pool.add_asset_from_data(data, source_sample_rate);
+                                pool_for_callback.store(Arc::new(new_pool));
+                                
+                                eprintln!("[Engine] Added Asset '{}' (ID: {})", name, id);
+                                let _ = response_tx.send(Ok(id));
                             } // End of Session Mode Loop
                         } // End of Session Mode Else Block
                     } // End of Playing Block
+                    
+                    // Clear local events for next block (if not used/moved)
+                    // Note: We move them below, but vectors remain. Clear them here?
+                    // No, we cleared them at start of closure? No, let's clear at start of block logic.
+                    // Actually, we append them below. So we must clear them somewhere.
+                    // Doing it at start of closure (line 106) would be best, but we are inside closure.
+                    // Let's clear them NOW after command loop is done?
+                    // NO, we need to use them below.
+                    // We must clear them at the START of the NEXT loop.
+                    // OR clear them right after usage.
+
 
                     let playing = play_flag.load(Ordering::Relaxed);
                     let frames = data.len() / channels;
@@ -513,6 +564,22 @@ impl AudioEngine {
                     // Resize Buffers (Keep Capacity)
                     // Prepare Buffers (Resize & Clear)
                     audio_buffers.prepare_buffers(frames, track_count, max_buffer_size);
+                    
+                    // Resize local_param_events if needed
+                    if local_param_events.len() < track_count {
+                        local_param_events.resize(track_count, Vec::new());
+                    }
+                    
+                    // Copy Parameter Events from Command Loop to Audio Buffers
+                    for (i, events) in local_param_events.iter_mut().enumerate() {
+                        if i < audio_buffers.track_param_events.len() && !events.is_empty() {
+                            audio_buffers.track_param_events[i].append(events);
+                            // events is now empty after append (moves content) -> Actually Vec::append moves elements.
+                            // But does it clear source? Yes, "The elements are moved... source becomes empty."
+                        } else {
+                             events.clear(); // Ensure clear if not appended (e.g. track removed)
+                        }
+                    }
 
                     // 1. Update Vol/Pan from Project (Always)
                     if active_notes.len() < track_count {
@@ -530,20 +597,35 @@ impl AudioEngine {
                     for (t_idx, notes) in active_notes.iter_mut().enumerate() {
                         if t_idx >= track_count { continue; }
                         
-                        let mut survived = Vec::new();
-                        // Explicit type annotation for drain
-                        let drained: std::vec::Drain<(u8, u64)> = notes.drain(..);
-                        for (note, remaining) in drained {
-                            if remaining > frames as u64 {
-                                survived.push((note, remaining - frames as u64));
+                        // Optimize allocation: Use retain instead of drain/push
+                        notes.retain_mut(|(note, remaining)| {
+                            if *remaining > frames as u64 {
+                                *remaining -= frames as u64;
+                                true // Keep note
                             } else {
+                                // Note Off
                                 audio_buffers.track_events[t_idx].push(MidiNoteEvent {
-                                    note, velocity: 0, channel: 0, sample_offset: 0,
+                                    note: *note, velocity: 0, channel: 0, sample_offset: 0,
                                     detune: 0.0,
                                 });
+                                false // Remove note
                             }
-                        }
-                        *notes = survived;
+                        });
+                        // Remove old logic using drain
+                        // let mut survived = Vec::new();
+                        // // Explicit type annotation for drain
+                        // let drained: std::vec::Drain<(u8, u64)> = notes.drain(..);
+                        // for (note, remaining) in drained {
+                        //     if remaining > frames as u64 {
+                        //         survived.push((note, remaining - frames as u64));
+                        //     } else {
+                        //         audio_buffers.track_events[t_idx].push(MidiNoteEvent {
+                        //             note, velocity: 0, channel: 0, sample_offset: 0,
+                        //             detune: 0.0,
+                        //         });
+                        //     }
+                        // }
+                        // *notes = survived;
                     }
                     
                     // 2b. If Playing: Generate Sequence Events (Note Ons)
@@ -572,8 +654,16 @@ impl AudioEngine {
                          if crossfade > 0.001 {
                               // Lock Audio Pool (Try lock to avoid blocking audio thread hard?)
                              // Unwrap is fine for now, contention should be low.
-                             if let Ok(pool) = pool_for_callback.try_lock() {
-                                 for (t_idx, track) in project.tracks.iter().enumerate() {
+                              // Lock-Free access (RCU)
+                              // Guard implicitly derefs efficiently
+                              { 
+                                  // Just entering scope to clarify lifetime of guard if needed, but here it's fine.
+                                  // Note: We need pool available for inner loop.
+                                  // Moved load inside logic or lift up? Lift up slightly.
+                                  // Actually we have `pool_for_callback.load()` call in loop.
+                              }
+                              if true { // Dummy block to preserve structure diff match, replace logic below
+                                  for (t_idx, track) in project.tracks.iter().enumerate() {
                                      if t_idx >= track_count || track.mute { continue; }
                                      
                                      let track_vol = audio_buffers.track_vols[t_idx];
@@ -595,7 +685,9 @@ impl AudioEngine {
                                                  let length = (render_end - render_start) as usize;
                                                  let source_offset = (render_start - clip_start + clip.start_offset.samples) as usize;
                                                  
-                                                 // Get Audio Data
+                                                 // Get Audio Data (Lock-Free)
+                                                 let pool = pool_for_callback.load();
+                                                 // pool is Guard<Arc<AudioPool>>
                                                  let asset_id = if clip.stretch { clip.cached_id.unwrap_or(clip.source_id) } else { clip.source_id };
                                                  if let Some(asset) = pool.get_asset(asset_id) {
                                                      let asset_data = &asset.data;
@@ -1283,6 +1375,7 @@ impl AudioEngine {
             current_step,
             sample_rate,
             audio_pool,
+            drop_tx: drop_tx_struct,
         })
     }
 

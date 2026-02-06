@@ -154,16 +154,26 @@ impl OmniApp {
     fn new(tx: Sender<EngineCommand>, rx: Receiver<EngineCommand>) -> Self {
         let tracks = Vec::new();
         
-        // Initialize Engine Immediately
-        // Since we are inside new(), we need to handle Result.
-        // But new() returns Self, panic or wrap?
-        // OmniApp::new takes tx/rx for commands.
-        // Actually, in main() we create tx/rx.
-        // We need to create the engine here using the rx passed in?
-        // Wait, main passes rx to new.
-        // So we can init engine here.
+        // Create Off-Thread Drop Channel (GC)
+        let (drop_tx, drop_rx) = crossbeam_channel::unbounded::<Box<dyn omni_engine::nodes::AudioNode>>();
         
-        let engine = match AudioEngine::new(rx) {
+        // Spawn GC Thread
+        std::thread::Builder::new()
+            .name("Omni-GC-Thread".to_string())
+            .spawn(move || {
+                eprintln!("[GC] Thread started.");
+                // Simply receive and drop. The iterator will block when empty and wake up when items arrive.
+                for node in drop_rx {
+                    // Explicitly drop for clarity, though loop scope does it anyway.
+                    // If dropping is expensive (e.g. freeing large buffers), it happens here.
+                    drop(node); 
+                }
+                eprintln!("[GC] Thread stopped.");
+            })
+            .expect("Failed to spawn GC thread");
+        
+        // Initialize Engine with drop channel
+        let engine = match AudioEngine::new(rx, drop_tx) {
             Ok(e) => Some(e),
             Err(e) => {
                 eprintln!("Failed to init engine: {}", e);

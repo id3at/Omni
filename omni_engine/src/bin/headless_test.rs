@@ -6,9 +6,10 @@ use std::time::Duration;
 fn main() -> Result<(), anyhow::Error> {
     println!("[Headless] Starting test runner...");
     let (tx, rx) = unbounded();
+    let (drop_tx, _drop_rx) = unbounded();
     
     // Initialize engine
-    let _engine = AudioEngine::new(rx)?;
+    let _engine = AudioEngine::new(rx, drop_tx)?;
     
     println!("[Headless] Engine initialized. Sending PLAY command...");
     tx.send(EngineCommand::Play)?;

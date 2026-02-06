@@ -62,7 +62,7 @@ impl ArrangementUI {
         _current_step: u32, 
         playback_pos_samples: u64,
         sample_rate: f32,
-        audio_pool: Option<&std::sync::Arc<std::sync::Mutex<omni_engine::assets::AudioPool>>>,
+        audio_pool: Option<&std::sync::Arc<arc_swap::ArcSwap<omni_engine::assets::AudioPool>>>,
     ) {
         let max_rect = ui.available_rect_before_wrap();
         // ui.set_clip_rect(max_rect); // Clip to available space
@@ -313,7 +313,10 @@ impl ArrangementUI {
                 // WAVEFORM RENDERING (with Caching)
                 if let Some(pool_arc) = audio_pool {
                     // Try to lock (don't block UI)
-                    if let Ok(pool) = pool_arc.try_lock() {
+                    // RCU Load (Lock-Free)
+                    let pool_guard = pool_arc.load();
+                    let pool = &**pool_guard;
+                    
                         let asset_id = if tracks[i].arrangement.clips[clip_idx].stretch { 
                             tracks[i].arrangement.clips[clip_idx].cached_id.unwrap_or(tracks[i].arrangement.clips[clip_idx].source_id)
                         } else {
@@ -381,7 +384,6 @@ impl ArrangementUI {
                                 }
                             }
                         }
-                    }
                 }
 
                 

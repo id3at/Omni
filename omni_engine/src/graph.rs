@@ -104,24 +104,36 @@ impl AudioGraph {
 
     /// Removes a node from the graph.
     /// Returns:
-    /// - `Some(NodeIndex)`: The old index of the node that was swapped into the removed node's place (if any).
-    /// - `None`: If the removed node was the last one (no swap occurred), or if the node didn't exist.
-    pub fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeIndex> {
+    /// - `Some((NodeIndex, Option<Box<dyn AudioNode>>))`: 
+    ///     - 0: The old index of the node that was swapped (if any).
+    ///     - 1: The removed node itself (so it can be dropped off-thread).
+    /// - `None`: If the node didn't exist? Wait, `remove_node` wraps petgraph.
+    /// 
+    /// Revised Return Type: Option<(Option<NodeIndex>, Option<Box<dyn AudioNode>>)>
+    pub fn remove_node_with_return(&mut self, idx: NodeIndex) -> Option<(Option<NodeIndex>, Option<Box<dyn AudioNode>>)> {
         let last_idx_before_remove = self.graph.node_count().checked_sub(1).map(NodeIndex::new);
         
-        if self.graph.remove_node(idx).is_some() {
+        // Remove node and get weight
+        if let Some(weight) = self.graph.remove_node(idx) {
             // Invalidate chains
             self.chains.clear();
             
+            let mut swapped_idx = None;
             // Check if a swap occurred
             if let Some(last_idx) = last_idx_before_remove {
                 if idx.index() < last_idx.index() {
                     // A swap occurred: The node at `last_idx` was moved to `idx`.
-                    return Some(last_idx);
+                    swapped_idx = Some(last_idx);
                 }
             }
+            return Some((swapped_idx, Some(weight)));
         }
         None
+    }
+    
+    // Legacy support or alias
+    pub fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeIndex> {
+        self.remove_node_with_return(idx).map(|(swapped, _)| swapped).flatten()
     }
 }
 
