@@ -20,8 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 // use petgraph::graph::NodeIndex;
 use std::sync::{Arc, Mutex}; // Added Mutex for AudioPool
 use crate::nodes::AudioNode;
-use std::fs::File;
-use std::io::Write;
+
 
 pub struct AudioEngine {
     _stream: cpal::Stream,
@@ -61,16 +60,17 @@ pub enum EngineCommand {
     TriggerClip { track_index: usize, clip_index: usize },
     SetTrackVolume { track_index: usize, volume: f32 },
     SetTrackPan { track_index: usize, pan: f32 },
-    SaveProject(String),
-    LoadProject(String),
+    // State Management (No I/O)
+    GetProjectState(Sender<omni_shared::project::Project>),
+    LoadProjectState(omni_shared::project::Project, Vec<Box<dyn crate::nodes::AudioNode>>),
     ResetGraph,
     StopTrack { track_index: usize },
     RemoveTrack { track_index: usize }, 
     NewProject, 
     OpenPluginEditor { track_index: usize },
     SetClipLength { track_index: usize, clip_index: usize, length: f64 },
-    AddTrack { plugin_path: Option<String> }, 
-    LoadPluginToTrack { track_index: usize, plugin_path: String }, 
+    AddTrackNode { node: Box<dyn crate::nodes::AudioNode>, name: String, plugin_path: Option<String> }, 
+    ReplaceTrackNode { track_index: usize, node: Box<dyn crate::nodes::AudioNode>, name: String, plugin_path: String }, 
     UpdateClipSequencer {
         track_index: usize,
         clip_index: usize,
@@ -83,7 +83,9 @@ pub enum EngineCommand {
     GetLastTouchedParam { track_index: usize, response_tx: Sender<Option<(u32, f32, u32)>> },
     
     // Asset Management
-    LoadAsset { path: String, response_tx: Sender<Result<u32, String>> }, 
+    // Asset Management
+    // UI Loads file, sends raw data. Engine adds to pool.
+    AddAsset { name: String, data: Vec<f32>, source_sample_rate: f32, response_tx: Sender<Result<u32, String>> }, 
     
     // View/Mode
     SetArrangementMode(bool),
@@ -410,45 +412,31 @@ impl AudioEngine {
                                     project.tracks[track_index].pan = pan;
                                 }
                             }
-                            EngineCommand::SaveProject(path) => {
-                                if let Ok(json) = serde_json::to_string_pretty(&project) {
-                                    if let Ok(mut file) = File::create(&path) {
-                                        let _ = file.write_all(json.as_bytes());
-                                        eprintln!("[Engine] Saved project to: {}", path);
-                                    }
-                                }
+                            EngineCommand::GetProjectState(response_tx) => {
+                                let _ = response_tx.send(project.clone());
                             }
-                            EngineCommand::LoadProject(path) => {
-                                if let Ok(content) = std::fs::read_to_string(&path) {
-                                    if let Ok(new_proj) = serde_json::from_str::<Project>(&content) {
-                                        // 1 Reset Graph
-                                        graph = AudioGraph::new();
-                                        track_node_indices.clear();
-                                        
-                                        // 2 Load Project
-                                        project = new_proj;
-                                        
-                                        // 3 Rebuild Graph from Project
-                                        for track in &project.tracks {
-                                             // Re-instantiate plugins or gain nodes
-                                             let plugin_path = if track.plugin_path.is_empty() { None } else { Some(track.plugin_path.as_str()) };
-                                             let node: Box<dyn AudioNode> = if let Some(path) = plugin_path {
-                                                 match PluginNode::new(path, sample_rate as f64) {
-                                                     Ok(n) => Box::new(n),
-                                                     Err(e) => {
-                                                         eprintln!("Error loading plugin: {}", e);
-                                                         Box::new(GainNode::new(1.0))
-                                                     }
-                                                 }
-                                             } else {
-                                                 Box::new(GainNode::new(1.0))
-                                             };
-                                             let node_idx = graph.add_node(node);
-                                             track_node_indices.push(node_idx);
-                                        }
-                                        eprintln!("[Engine] Loaded project state: {}", path);
-                                    }
+                            EngineCommand::LoadProjectState(new_proj, nodes) => {
+                                // 1 Reset Graph
+                                graph = AudioGraph::new();
+                                track_node_indices.clear();
+                                
+                                // 2 Load Project
+                                project = new_proj;
+                                
+                                // 3 Rebuild Graph from Project & Provided Nodes
+                                // We expect nodes to match tracks 1:1, but handle mismatches safely
+                                let mut nodes_iter = nodes.into_iter();
+                                
+                                for track in &project.tracks {
+                                    // Use provided node or fallback to GainNode
+                                    let node: Box<dyn AudioNode> = nodes_iter.next().unwrap_or_else(|| {
+                                        Box::new(GainNode::new(1.0))
+                                    });
+                                
+                                    let node_idx = graph.add_node(node);
+                                    track_node_indices.push(node_idx);
                                 }
+                                eprintln!("[Engine] Loaded project state (Non-Blocking Swap)");
                             }
                             EngineCommand::ResetGraph => {
                                 graph = AudioGraph::new();
@@ -516,6 +504,22 @@ impl AudioEngine {
                                         project.tracks.remove(track_index);
                                     }
                                     
+                                    // 2. Remove from Graph (Prevent Memory Leak)
+                                    let node_idx_to_remove = track_node_indices[track_index];
+                                    
+                                    // graph.remove_node performs a swap-remove, moving the last node to the removed index.
+                                    // It returns the index of the node that was moved (if any).
+                                    if let Some(swapped_node_idx) = graph.remove_node(node_idx_to_remove) {
+                                        // We must find which track point to `swapped_node_idx` and update it to `node_idx_to_remove`
+                                        // because that node has moved to the recycled index.
+                                        for idx in track_node_indices.iter_mut() {
+                                            if *idx == swapped_node_idx {
+                                                *idx = node_idx_to_remove;
+                                                break;
+                                            }
+                                        }
+                                    }
+
                                     // 3. Remove Node Index Mapping
                                     track_node_indices.remove(track_index);
                                     
@@ -525,48 +529,26 @@ impl AudioEngine {
                                     eprintln!("[Engine] Removed Track {}", track_index);
                                 }
                             }
-                            EngineCommand::AddTrack { plugin_path } => {
-                                let node: Box<dyn AudioNode> = if let Some(ref path) = plugin_path {
-                                     match PluginNode::new(path, sample_rate as f64) {
-                                         Ok(n) => Box::new(n),
-                                         Err(e) => {
-                                             eprintln!("Error loading plugin: {}", e);
-                                             Box::new(GainNode::new(1.0))
-                                         }
-                                     }
-                                } else {
-                                     Box::new(GainNode::new(1.0))
-                                };
-                                
+                            EngineCommand::AddTrackNode { node, name, plugin_path } => {
                                 let node_idx = graph.add_node(node);
                                 let mut t = Track::default();
-                                t.name = if plugin_path.is_some() { "Plugin" } else { "Sine" }.into();
+                                t.name = name;
                                 if let Some(p) = plugin_path { t.plugin_path = p; }
                                 
                                 project.tracks.push(t);
                                 track_node_indices.push(node_idx);
                             }
-                            EngineCommand::LoadPluginToTrack { track_index, plugin_path } => {
+                            EngineCommand::ReplaceTrackNode { track_index, node, name, plugin_path } => {
                                  if let Some(&node_idx) = track_node_indices.get(track_index) {
-                                     match PluginNode::new(&plugin_path, sample_rate as f64) {
-                                         Ok(node) => {
-                                              if let Some(existing_node_ref) = graph.node_mut(node_idx) {
-                                                  *existing_node_ref = Box::new(node);
-                                                  
-                                                  // Update Project
-                                                  if track_index < project.tracks.len() {
-                                                      let name = std::path::Path::new(&plugin_path)
-                                                          .file_stem()
-                                                          .and_then(|s| s.to_str())
-                                                          .unwrap_or("Plugin")
-                                                          .to_string();
-                                                      project.tracks[track_index].name = name;
-                                                      project.tracks[track_index].plugin_path = plugin_path;
-                                                  }
-                                              }
-                                         },
-                                         Err(e) => eprintln!("Failed to load plugin: {}", e),
-                                     }
+                                      if let Some(existing_node_ref) = graph.node_mut(node_idx) {
+                                          *existing_node_ref = node;
+                                          
+                                          // Update Project
+                                          if track_index < project.tracks.len() {
+                                              project.tracks[track_index].name = name;
+                                              project.tracks[track_index].plugin_path = plugin_path;
+                                          }
+                                      }
                                  }
                             }
                             EngineCommand::UpdateClipSequencer { track_index, clip_index, use_sequencer, data } => {
@@ -597,38 +579,16 @@ impl AudioEngine {
                                     }
                                 }
                             }
-                            EngineCommand::LoadAsset { path, response_tx } => {
-                                // For now, we load assets on the audio thread callback (Not ideal for real-time, 
-                                // but safe from concurrency if we only mutate audio_pool here or via Mutex).
-                                // Since we use Mutex, we can actually allow loading from UI thread if we wanted, 
-                                // but here we are in the command loop. 
-                                // Loading file in audio thread is BAD practice (blocking).
-                                // BUT: This is a prototype. We should spawn a thread or do it in UI thread and just push data.
-                                // However, AudioPool is owned by Engine logic? No, it's Arc<Mutex>.
-                                // So we can upgrade this later.
-                                
-                                // Using loop to not block audio processing? 
-                                // No, this IS the audio callback. We MUST NOT block.
-                                // The command handling happens once per buffer.
-                                // Ideally, the UI loads the file and sends an `AddAsset` command with the data.
-                                // But `hound` is easier here.
-                                
-                                // COMPROMISE: We will clone pool reference and spawn a thread to load, 
-                                // then insert into pool. BUT Mutex contention might block audio thread?
-                                // Only if audio thread holds lock for long.
-                                // Audio thread only reads from pool.
-                                
-                                // BETTER: Do it synchronously here for simplicity now, verify non-blocking later (Background Loader task).
-                                // User plan explicitly mentions "Background Loader".
-                                // So let's respect that. We spawn a thread here.
-                                
-                                let pool_ref = pool_for_callback.clone();
-                                std::thread::spawn(move || {
-                                    let mut pool = pool_ref.lock().unwrap();
-                                    let res = pool.load_asset(&path)
-                                        .map_err(|e| e.to_string());
-                                    let _ = response_tx.send(res);
-                                });
+                            EngineCommand::AddAsset { name, data, source_sample_rate, response_tx } => {
+                                // Add directly to pool. No thread spawning, no I/O.
+                                // We take the lock briefly.
+                                if let Ok(mut pool) = pool_for_callback.lock() {
+                                    let id = pool.add_asset_from_data(data, source_sample_rate);
+                                    eprintln!("[Engine] Added Asset '{}' (ID: {})", name, id);
+                                    let _ = response_tx.send(Ok(id));
+                                } else {
+                                    let _ = response_tx.send(Err("Failed to lock pool".to_string()));
+                                }
                             } // End of Session Mode Loop
                         } // End of Session Mode Else Block
                     } // End of Playing Block
