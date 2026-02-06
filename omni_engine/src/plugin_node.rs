@@ -189,6 +189,8 @@ impl Drop for PluginNode {
         let _ = self.process.kill();
         let _ = self.process.wait(); // Clean up zombie
     }
+
+
 }
 
 impl AudioNode for PluginNode {
@@ -344,6 +346,10 @@ impl AudioNode for PluginNode {
             (p, v, g)
         }
     }
+
+    fn get_latency(&self) -> u32 {
+        self.get_latency()
+    }
 }
 
 impl PluginNode {
@@ -397,6 +403,14 @@ impl PluginNode {
             let v = std::ptr::read_volatile(&header.last_touched_value);
             let g = std::ptr::read_volatile(&header.touch_generation);
             (p, v, g)
+        }
+    }
+
+    pub fn get_latency(&self) -> u32 {
+        unsafe {
+            let ptr = self.shmem.as_ptr();
+            let header = &*(ptr as *const OmniShmemHeader);
+            std::ptr::read_volatile(&header.latency)
         }
     }
 }

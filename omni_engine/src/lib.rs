@@ -3,18 +3,22 @@ pub mod nodes;
 pub mod plugin_node;
 pub mod sequencer;
 pub mod transport;
+pub mod assets; // Added
+pub mod delay;
+pub mod resampler;
 
 use crate::graph::AudioGraph;
-use crate::nodes::{GainNode}; // Added GainNode
+use crate::nodes::{GainNode}; 
 use crate::plugin_node::PluginNode;
 use crate::sequencer::{Sequencer, StepGenerator};
+use crate::assets::AudioPool; // Added
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender};
 use omni_shared::project::{Project, Track};
 use omni_shared::MidiNoteEvent;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 // use petgraph::graph::NodeIndex;
-use std::sync::{Arc};
+use std::sync::{Arc, Mutex}; // Added Mutex for AudioPool
 use crate::nodes::AudioNode;
 use std::fs::File;
 use std::io::Write;
@@ -22,10 +26,13 @@ use std::io::Write;
 pub struct AudioEngine {
     _stream: cpal::Stream,
     is_playing: Arc<AtomicBool>,
+    is_recording: Arc<AtomicBool>, // Recording to Arrangement
     sample_position: Arc<AtomicU64>,
+    recording_start_sample: Arc<AtomicU64>, // Sample position when recording started
     _sequencer: Sequencer,
     current_step: Arc<AtomicU32>,
-    sample_rate: u32,
+    pub sample_rate: u32,
+    pub audio_pool: Arc<Mutex<AudioPool>>,
 }
 
 
@@ -58,12 +65,12 @@ pub enum EngineCommand {
     LoadProject(String),
     ResetGraph,
     StopTrack { track_index: usize },
-    RemoveTrack { track_index: usize }, // Added
-    NewProject, // Added
+    RemoveTrack { track_index: usize }, 
+    NewProject, 
     OpenPluginEditor { track_index: usize },
     SetClipLength { track_index: usize, clip_index: usize, length: f64 },
-    AddTrack { plugin_path: Option<String> }, // Added AddTrack command
-    LoadPluginToTrack { track_index: usize, plugin_path: String }, // Added LoadPlugin command
+    AddTrack { plugin_path: Option<String> }, 
+    LoadPluginToTrack { track_index: usize, plugin_path: String }, 
     UpdateClipSequencer {
         track_index: usize,
         clip_index: usize,
@@ -74,6 +81,20 @@ pub enum EngineCommand {
     GetNoteNames { track_index: usize, response_tx: Sender<(String, Vec<omni_shared::NoteNameInfo>)> },
     // Returns (param_id, value, generation)
     GetLastTouchedParam { track_index: usize, response_tx: Sender<Option<(u32, f32, u32)>> },
+    
+    // Asset Management
+    LoadAsset { path: String, response_tx: Sender<Result<u32, String>> }, 
+    
+    // View/Mode
+    SetArrangementMode(bool),
+    
+    // Arrangement Editing
+    MoveClip { track_index: usize, clip_index: usize, new_start: u64 },
+    StretchClip { track_index: usize, clip_index: usize, original_bpm: f32 },
+    
+    // Recording Session to Arrangement
+    StartRecording,
+    StopRecording { response_tx: Sender<Vec<(usize, omni_shared::project::ArrangementClip)>> }, // Returns (track_idx, clip) pairs
 }
 
 impl AudioEngine {
@@ -98,15 +119,23 @@ impl AudioEngine {
 
         // Shared Atomic State
         let play_flag = Arc::new(AtomicBool::new(false));
+        let record_flag = Arc::new(AtomicBool::new(false)); // Recording to Arrangement
         let pos_counter = Arc::new(AtomicU64::new(0));
+        let rec_start_counter = Arc::new(AtomicU64::new(0)); // Recording start sample
         let master_gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let current_step = Arc::new(AtomicU32::new(0));
 
         let is_playing = play_flag.clone();
+        let is_recording = record_flag.clone();
         let sample_position = pos_counter.clone();
+        let recording_start_sample = rec_start_counter.clone();
         let master_gain_callback = master_gain.clone();
         let current_step_callback = current_step.clone();
         
+        // Audio Pool
+        let audio_pool = Arc::new(Mutex::new(AudioPool::new()));
+        let pool_for_callback = audio_pool.clone(); // Clone for audio thread
+
         // Owned State for Audio Thread
         let mut graph = AudioGraph::new();
         let mut project = Project::default();
@@ -133,6 +162,7 @@ impl AudioEngine {
             track_expression_events: Vec<Vec<omni_shared::ExpressionEvent>>,
             track_param_events: Vec<Vec<omni_shared::ParameterEvent>>,
             master_mix: Vec<f32>,
+            recording_bufs: Vec<Vec<f32>>, // Per-track recording buffers
         }
         
         let max_buffer_size = 2048 * 2;
@@ -146,7 +176,13 @@ impl AudioEngine {
             track_expression_events: vec![Vec::with_capacity(omni_shared::MAX_EXPRESSION_EVENTS); max_tracks],
             track_param_events: vec![Vec::with_capacity(omni_shared::MAX_PARAM_EVENTS); max_tracks],
             master_mix: vec![0.0; max_buffer_size],
+            recording_bufs: vec![Vec::new(); max_tracks], // Grows during recording
         };
+
+        // PDC Delays
+        let mut track_delays: Vec<crate::delay::DelayLine> = Vec::new();
+        
+        let mut crossfade: f32 = 0.0; // 0.0 = Session, 1.0 = Arrangement
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => device.build_output_stream(
@@ -168,6 +204,53 @@ impl AudioEngine {
                             EngineCommand::SetBpm(bpm) => {
                                 sequencer.bpm = bpm;
                             }
+                            EngineCommand::SetArrangementMode(mode) => {
+                                project.arrangement_mode = mode;
+                                eprintln!("[Engine] Arrangement Mode: {}", mode);
+                            }
+                            EngineCommand::MoveClip { track_index, clip_index, new_start } => {
+                                if let Some(track) = project.tracks.get_mut(track_index) {
+                                    if let Some(clip) = track.arrangement.clips.get_mut(clip_index) {
+                                        clip.start_time.samples = new_start;
+                                    }
+                                }
+                            }
+                            EngineCommand::StretchClip { track_index, clip_index, original_bpm } => {
+                                let project_bpm = project.bpm;
+                                let mut result_id = None;
+                                let mut target_ratio = 1.0;
+                                let mut source_id; // Uninitialized
+                                
+                                if let Some(track) = project.tracks.get(track_index) {
+                                    if let Some(clip) = track.arrangement.clips.get(clip_index) {
+                                        source_id = clip.source_id;
+                                        if original_bpm > 0.0 {
+                                            target_ratio = project_bpm / original_bpm;
+                                            
+                                            // Process in AudioPool (Safe here)
+                                            if let Ok(mut pool) = pool_for_callback.lock() {
+                                                if let Ok(id) = pool.get_or_create_stretched(source_id, target_ratio) {
+                                                    result_id = Some(id);
+                                                    eprintln!("[Engine] Stretched Clip {}:{} (Source {}) Ratio {:.2} -> Asset {}", track_index, clip_index, source_id, target_ratio, id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Apply Update
+                                if let Some(id) = result_id {
+                                    if let Some(track) = project.tracks.get_mut(track_index) {
+                                        if let Some(clip) = track.arrangement.clips.get_mut(clip_index) {
+                                            clip.cached_id = Some(id);
+                                            clip.stretch = true;
+                                            clip.stretch_ratio = target_ratio;
+                                            // TODO: Store original_bpm in AudioAsset metadata? Or Clip?
+                                            // For now assuming UI passes it. 
+                                        }
+                                    }
+                                }
+                            }
                             EngineCommand::SetClipLength { track_index, clip_index, length } => {
                                 if let Some(track) = project.tracks.get_mut(track_index) {
                                     if let Some(clip) = track.clips.get_mut(clip_index) {
@@ -175,6 +258,75 @@ impl AudioEngine {
                                         eprintln!("[Engine] Updated Clip {}:{} Length to {} beats. Seq pattern_length remains {}", track_index, clip_index, length, sequencer.pattern_length);
                                     }
                                 }
+                            }
+                            EngineCommand::StartRecording => {
+                                // Start recording to Arrangement
+                                // Reset playhead to 0 for simpler UX - recordings always start at 0
+                                pos_counter.store(0, Ordering::Relaxed);
+                                record_flag.store(true, Ordering::Relaxed);
+                                rec_start_counter.store(0, Ordering::Relaxed);
+                                
+                                // Clear recording buffers
+                                for buf in audio_buffers.recording_bufs.iter_mut() {
+                                    buf.clear();
+                                }
+                                
+                                // Clear previous recorded clips from arrangement (optional - prevents overlap)
+                                // This provides a "fresh recording" each time
+                                for track in project.tracks.iter_mut() {
+                                    track.arrangement.clips.retain(|clip| !clip.name.starts_with("Recorded_"));
+                                }
+                                
+                                eprintln!("[Engine] Recording Started. Playhead reset to 0.");
+                            }
+                            EngineCommand::StopRecording { response_tx } => {
+                                // Stop recording and finalize
+                                record_flag.store(false, Ordering::Relaxed);
+                                let rec_start = rec_start_counter.load(Ordering::Relaxed);
+                                eprintln!("[Engine] Recording Stopped. Start: {}, Processing {} tracks...", rec_start, audio_buffers.recording_bufs.len());
+                                
+                                let mut created_clips: Vec<(usize, omni_shared::project::ArrangementClip)> = Vec::new();
+                                
+                                // Finalize: Convert recording buffers to AudioAssets and ArrangementClips
+                                for (track_idx, rec_buf) in audio_buffers.recording_bufs.iter_mut().enumerate() {
+                                    if !rec_buf.is_empty() {
+                                        // Create AudioAsset from recorded data
+                                        let asset_data = std::mem::take(rec_buf);
+                                        let asset_len = asset_data.len();
+                                        
+                                        if let Ok(mut pool) = pool_for_callback.lock() {
+                                            let asset_id = pool.add_asset_from_data(asset_data, sample_rate as f32);
+                                            eprintln!("[Engine] Track {} : Created Asset {} from {} samples", track_idx, asset_id, asset_len);
+                                            
+                                            // Create ArrangementClip
+                                            let clip = omni_shared::project::ArrangementClip {
+                                                source_id: asset_id,
+                                                start_time: omni_shared::project::Timestamp { samples: rec_start, fractional: 0.0 },
+                                                start_offset: omni_shared::project::Timestamp::default(),
+                                                length: omni_shared::project::Timestamp { samples: asset_len as u64, fractional: 0.0 },
+                                                name: format!("Recorded_{}", asset_id),
+                                                selected: false,
+                                                warp_markers: Vec::new(),
+                                                stretch: false,
+                                                stretch_ratio: 1.0,
+                                                original_bpm: project.bpm,
+                                                cached_id: None,
+                                            };
+                                            
+                                            // Add to internal project
+                                            if let Some(track) = project.tracks.get_mut(track_idx) {
+                                                track.arrangement.clips.push(clip.clone());
+                                                eprintln!("[Engine] Track {} : Created ArrangementClip starting at sample {}", track_idx, rec_start);
+                                            }
+                                            
+                                            // Collect for response
+                                            created_clips.push((track_idx, clip));
+                                        }
+                                    }
+                                }
+                                
+                                // Send created clips back to UI
+                                let _ = response_tx.send(created_clips);
                             }
                             EngineCommand::SetPluginParam { track_index, id, value } => {
                                 // 1. Update Engine Node
@@ -445,8 +597,41 @@ impl AudioEngine {
                                     }
                                 }
                             }
-                        }
-                    }
+                            EngineCommand::LoadAsset { path, response_tx } => {
+                                // For now, we load assets on the audio thread callback (Not ideal for real-time, 
+                                // but safe from concurrency if we only mutate audio_pool here or via Mutex).
+                                // Since we use Mutex, we can actually allow loading from UI thread if we wanted, 
+                                // but here we are in the command loop. 
+                                // Loading file in audio thread is BAD practice (blocking).
+                                // BUT: This is a prototype. We should spawn a thread or do it in UI thread and just push data.
+                                // However, AudioPool is owned by Engine logic? No, it's Arc<Mutex>.
+                                // So we can upgrade this later.
+                                
+                                // Using loop to not block audio processing? 
+                                // No, this IS the audio callback. We MUST NOT block.
+                                // The command handling happens once per buffer.
+                                // Ideally, the UI loads the file and sends an `AddAsset` command with the data.
+                                // But `hound` is easier here.
+                                
+                                // COMPROMISE: We will clone pool reference and spawn a thread to load, 
+                                // then insert into pool. BUT Mutex contention might block audio thread?
+                                // Only if audio thread holds lock for long.
+                                // Audio thread only reads from pool.
+                                
+                                // BETTER: Do it synchronously here for simplicity now, verify non-blocking later (Background Loader task).
+                                // User plan explicitly mentions "Background Loader".
+                                // So let's respect that. We spawn a thread here.
+                                
+                                let pool_ref = pool_for_callback.clone();
+                                std::thread::spawn(move || {
+                                    let mut pool = pool_ref.lock().unwrap();
+                                    let res = pool.load_asset(&path)
+                                        .map_err(|e| e.to_string());
+                                    let _ = response_tx.send(res);
+                                });
+                            } // End of Session Mode Loop
+                        } // End of Session Mode Else Block
+                    } // End of Playing Block
 
                     let playing = play_flag.load(Ordering::Relaxed);
                     let frames = data.len() / channels;
@@ -478,6 +663,7 @@ impl AudioEngine {
                              // This keeps capacity if it's large enough
                              audio_buffers.track_bufs[i].resize(frames * 2, 0.0);
                         }
+                        audio_buffers.track_bufs[i].fill(0.0);
                     }
 
                     // 1. Update Vol/Pan from Project (Always)
@@ -514,27 +700,116 @@ impl AudioEngine {
                     
                     // 2b. If Playing: Generate Sequence Events (Note Ons)
                     // 2b. If Playing: Generate Sequence Events (Note Ons)
+                    // 2b. If Playing: Generate Sequence Events (Note Ons) or Arrangement Audio
+                    // 2b. If Playing: Generate Sequence Events (Note Ons) or Arrangement Audio
                     if playing {
-                         // Calculate time range for this buffer
-                         let bpm = sequencer.bpm;
-                         let samples_per_beat = (sample_rate_val * 60.0) / bpm;
                          let current_sample = pos_counter.load(Ordering::Relaxed);
-                         
-                         let start_beat = (current_sample as f64) / samples_per_beat as f64;
-                         let end_beat = ((current_sample + frames as u64) as f64) / samples_per_beat as f64;
-                         
-                         // Update UI step (floored beat * 4 for 16th notes)
-                         let current_16th = (start_beat * 4.0) as u32;
-                         // Use dynamic pattern length from sequencer
-                         let len_steps = sequencer.pattern_length.max(1);
-                         current_step_callback.store(current_16th % len_steps, Ordering::Relaxed);
+                         let frames_u64 = frames as u64;
+                         let buffer_end_sample = current_sample + frames_u64;
 
-                         for (t_idx, track) in project.tracks.iter().enumerate() {
-                             if t_idx < track_count && !track.mute {
-                                 if let Some(clip_idx) = track.active_clip_index {
-                                     if let Some(clip) = track.clips.get(clip_idx) {
-                                         // Check notes in this clip
-                                         if clip.use_sequencer {
+                         // CALCULATE CROSSFADE
+                         let target_crossfade = if project.arrangement_mode { 1.0 } else { 0.0 };
+                         if (crossfade - target_crossfade).abs() > 0.001 {
+                             let step = 0.1; // Fast fade (approx 10 blocks = 200ms at 2048)
+                             if crossfade < target_crossfade {
+                                 crossfade = (crossfade + step).min(target_crossfade);
+                             } else {
+                                 crossfade = (crossfade - step).max(target_crossfade);
+                             }
+                         } else {
+                             crossfade = target_crossfade;
+                         }
+
+                         // --- ARRANGEMENT MODE (Sample-Accurate Audio) ---
+                         if crossfade > 0.001 {
+                              // Lock Audio Pool (Try lock to avoid blocking audio thread hard?)
+                             // Unwrap is fine for now, contention should be low.
+                             if let Ok(pool) = pool_for_callback.try_lock() {
+                                 for (t_idx, track) in project.tracks.iter().enumerate() {
+                                     if t_idx >= track_count || track.mute { continue; }
+                                     
+                                     let track_vol = audio_buffers.track_vols[t_idx];
+                                     let track_pan = audio_buffers.track_pans[t_idx];
+                                     
+                                     // Iterate Arrangement Clips
+                                     for clip in &track.arrangement.clips {
+                                         // Check overlap with current buffer
+                                         let clip_start = clip.start_time.samples;
+                                         let clip_end = clip_start + clip.length.samples;
+                                         
+                                         if clip_end > current_sample && clip_start < buffer_end_sample {
+                                             // Calculate intersection
+                                             let render_start = clip_start.max(current_sample);
+                                             let render_end = clip_end.min(buffer_end_sample);
+                                             
+                                             if render_end > render_start {
+                                                 let buffer_offset = (render_start - current_sample) as usize;
+                                                 let length = (render_end - render_start) as usize;
+                                                 let source_offset = (render_start - clip_start + clip.start_offset.samples) as usize;
+                                                 
+                                                 // Get Audio Data
+                                                 let asset_id = if clip.stretch { clip.cached_id.unwrap_or(clip.source_id) } else { clip.source_id };
+                                                 if let Some(asset) = pool.get_asset(asset_id) {
+                                                     let asset_data = &asset.data;
+                                                     // Safety check
+                                                     if source_offset + length <= asset_data.len() {
+                                                         // Mix directly to master_mix (not track_bufs which gets overwritten)
+                                                         // Apply track volume, pan, and crossfade
+                                                         let mut l_gain = track_vol * crossfade;
+                                                         let mut r_gain = track_vol * crossfade;
+                                                         
+                                                         if track_pan > 0.0 {
+                                                             l_gain *= 1.0 - track_pan;
+                                                         } else if track_pan < 0.0 {
+                                                             r_gain *= 1.0 + track_pan;
+                                                         }
+                                                         
+                                                         for i in 0..length {
+                                                             let sample = asset_data[source_offset + i];
+                                                             let dst_idx = (buffer_offset + i) * 2;
+                                                             // Mix to master directly (mono source -> stereo)
+                                                             audio_buffers.master_mix[dst_idx] += sample * l_gain;
+                                                             audio_buffers.master_mix[dst_idx + 1] += sample * r_gain;
+                                                         }
+                                                     }
+                                                 }
+                                             }
+                                         }
+                                     }
+                                 }
+                             }
+                             
+                             // Update UI step for visual feedback (even in Arrangement)
+                             // Be precise
+                             let bpm = sequencer.bpm;
+                             let samples_per_beat = (sample_rate_val * 60.0) / bpm;
+                             let current_beat = (current_sample as f64) / samples_per_beat as f64;
+                             current_step_callback.store((current_beat * 4.0) as u32, Ordering::Relaxed);
+                         }
+
+                         // --- SESSION MODE (Loop-based Sequencer) ---
+                         if crossfade < 0.999 {
+                             // Calculate time range for this buffer
+                             let bpm = sequencer.bpm;
+                             let samples_per_beat = (sample_rate_val * 60.0) / bpm;
+                             // let current_sample = pos_counter.load(Ordering::Relaxed); // Already loaded
+                             
+                             let start_beat = (current_sample as f64) / samples_per_beat as f64;
+                             let end_beat = ((current_sample + frames as u64) as f64) / samples_per_beat as f64;
+                             
+                             // Update UI step (floored beat * 4 for 16th notes)
+                             let current_16th = (start_beat * 4.0) as u32;
+                             // Use dynamic pattern length from sequencer
+                             let len_steps = sequencer.pattern_length.max(1);
+                             current_step_callback.store(current_16th % len_steps, Ordering::Relaxed);
+    
+                             for (t_idx, track) in project.tracks.iter().enumerate() {
+                                 if t_idx < track_count && !track.mute {
+                                     if let Some(clip_idx) = track.active_clip_index {
+                                         if let Some(clip) = track.clips.get(clip_idx) {
+                                             // Check notes in this clip
+                                             if clip.use_sequencer {
+
                                             // --- THESYS STEP SEQUENCER LOGIC ---
                                             let seq = &clip.step_sequencer;
                                             
@@ -1013,7 +1288,8 @@ impl AudioEngine {
                                  }
                              }
                          }
-                    }
+                     } // End Session Else
+                } // End if playing
 
                     // 3. Update Global Transport for PluginNodes
                     {
@@ -1047,6 +1323,50 @@ impl AudioEngine {
                     
                     graph.process_overlay(&track_node_indices, buf_slice, evt_slice, param_evt_slice, expr_evt_slice, sample_rate_val);
 
+                    // 4a. PDC (Plugin Delay Compensation)
+                    // Calculate latencies and apply delay to align tracks
+                    if track_delays.len() < track_count {
+                         let buffer_size_samples = sample_rate as usize * 2; // 2 seconds buffer
+                         track_delays.resize_with(track_count, || crate::delay::DelayLine::new(buffer_size_samples, sample_rate as f32));
+                    }
+
+                    // Query Latencies
+                    let mut latencies: Vec<u32> = vec![0; track_count]; 
+                    let mut max_latency = 0;
+                    
+                    for (i, &node_idx) in track_node_indices.iter().enumerate() {
+                        // Unsafe access hack or just use node_mut? 
+                        // We have mut ref to graph.
+                        if let Some(node) = graph.node_mut(node_idx) {
+                             let l = node.get_latency();
+                             latencies[i] = l;
+                             if l > max_latency { max_latency = l; }
+                        }
+                    }
+
+                    // Apply Delays
+                    if max_latency > 0 {
+                         for i in 0..track_count {
+                              let needed_delay = max_latency - latencies[i];
+                              if needed_delay > 0 {
+                                  // Use buf_slice to respect borrowing
+                                  let track_buf = &mut buf_slice[i];
+                                  // Ensure DelayLine is ready
+                                  if i < track_delays.len() {
+                                      track_delays[i].process_in_place(track_buf, needed_delay);
+                                  }
+                              } else {
+                                  // 0 Delay
+                                  let track_buf = &mut buf_slice[i];
+                                  if i < track_delays.len() {
+                                      track_delays[i].process_in_place(track_buf, 0); 
+                                  }
+                              }
+                         }
+                    }
+
+                    // 4b. Mix to Master
+
                     // 4. Mix to Master
                     for (t_idx, track_buf) in buf_slice.iter().enumerate() {
                          let vol = audio_buffers.track_vols[t_idx];
@@ -1070,6 +1390,26 @@ impl AudioEngine {
                          }
                      }
                      
+                     // 4c. Recording Capture (Session -> Arrangement)
+                     // Capture audio only when recording in Session mode (not arrangement)
+                     let is_rec = record_flag.load(Ordering::Relaxed);
+                     if is_rec && !project.arrangement_mode && playing {
+                         // Log once per second approx
+                         static mut LAST_LOG: u64 = 0;
+                         let current_pos = pos_counter.load(Ordering::Relaxed);
+                         if unsafe { current_pos.saturating_sub(LAST_LOG) > sample_rate as u64 } {
+                             eprintln!("[Engine] Recording: capturing {} tracks, {} frames", track_count, frames);
+                             unsafe { LAST_LOG = current_pos };
+                         }
+                         
+                         for t_idx in 0..track_count {
+                             // Downmix stereo to mono for recording buffer
+                             for i in 0..frames {
+                                 let mono = (audio_buffers.track_bufs[t_idx][i * 2] + audio_buffers.track_bufs[t_idx][i * 2 + 1]) * 0.5;
+                                 audio_buffers.recording_bufs[t_idx].push(mono);
+                             }
+                         }
+                     }
                      if playing {
                          pos_counter.fetch_add(frames as u64, Ordering::Relaxed);
                      }
@@ -1100,10 +1440,13 @@ impl AudioEngine {
         Ok(Self {
             _stream: stream,
             is_playing,
+            is_recording,
             sample_position,
+            recording_start_sample,
             _sequencer: Sequencer::new(120.0), // Placeholder
             current_step,
             sample_rate,
+            audio_pool,
         })
     }
 

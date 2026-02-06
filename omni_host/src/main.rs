@@ -5,6 +5,8 @@ use eframe::egui;
 use omni_shared::project::{Project, StepSequencerData};
 mod sequencer_ui;
 use sequencer_ui::SequencerUI;
+mod arrangement_ui;
+use arrangement_ui::ArrangementUI;
 
 #[derive(Clone)]
 pub struct ClipData {
@@ -37,6 +39,7 @@ pub struct TrackData {
     pub trigger_flash: f32,
     /// Valid MIDI notes for this track's plugin (None = all 128 notes valid)
     pub valid_notes: Option<Vec<i16>>,
+    pub arrangement: omni_shared::project::TrackArrangement,
 }
 
 impl Default for TrackData {
@@ -50,6 +53,7 @@ impl Default for TrackData {
             active_clip: None,
             trigger_flash: 0.0,
             valid_notes: None,
+            arrangement: omni_shared::project::TrackArrangement::default(),
         }
     }
 }
@@ -96,6 +100,7 @@ fn knob_ui(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f
 // #[serde(default)] // Disabled for now to fix channel initialization issues
 pub struct OmniApp {
     is_playing: bool,
+    is_recording: bool, // Recording Session to Arrangement
     master_volume: f32,
     messenger: Sender<EngineCommand>,
     _receiver: Option<Receiver<EngineCommand>>,
@@ -136,6 +141,10 @@ pub struct OmniApp {
     
     // Deferred Actions (RefCell to mutate from inside UI closures)
     deferred_track_remove: std::cell::RefCell<Option<usize>>,
+    
+    // Arrangement Logic
+    arrangement_ui: ArrangementUI,
+    show_arrangement_view: bool,
 }
 
 impl OmniApp {
@@ -161,6 +170,7 @@ impl OmniApp {
 
         Self {
             is_playing: false,
+            is_recording: false,
             master_volume: 0.1,
             messenger: tx,
             _receiver: None, // Taken by engine
@@ -190,6 +200,9 @@ impl OmniApp {
             last_touched_generation: 0,
             pending_last_touched_rx: None,
             deferred_track_remove: std::cell::RefCell::new(None),
+            
+            arrangement_ui: ArrangementUI::new(),
+            show_arrangement_view: false,
         }
     }
 
@@ -217,6 +230,7 @@ impl OmniApp {
                              pan: shared_track.pan,
                              mute: shared_track.mute,
                              active_clip: shared_track.active_clip_index,
+                             arrangement: shared_track.arrangement.clone(),
                              ..Default::default()
                          };
                          for (c_idx, shared_clip) in shared_track.clips.iter().enumerate() {
@@ -516,6 +530,34 @@ impl eframe::App for OmniApp {
                     let cmd = if self.is_playing { EngineCommand::Play } else { EngineCommand::Stop };
                     let _ = self.messenger.send(cmd);
                 }
+                
+                // REC button - records Session to Arrangement
+                let rec_label = if self.is_recording { "⏹ STOP REC" } else { "🔴 REC" };
+                let rec_btn = ui.button(rec_label);
+                if rec_btn.clicked() {
+                    self.is_recording = !self.is_recording;
+                    if self.is_recording { 
+                        // Clear previous recorded clips from UI (Engine also does this)
+                        for track in self.tracks.iter_mut() {
+                            track.arrangement.clips.retain(|clip| !clip.name.starts_with("Recorded_"));
+                        }
+                        let _ = self.messenger.send(EngineCommand::StartRecording);
+                    } else { 
+                        // Create channel to receive recorded clips
+                        let (tx, rx) = crossbeam_channel::unbounded();
+                        let _ = self.messenger.send(EngineCommand::StopRecording { response_tx: tx });
+                        
+                        // Wait briefly for response (non-blocking in practice since engine is fast)
+                        if let Ok(clips) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                            for (track_idx, clip) in clips {
+                                if let Some(track) = self.tracks.get_mut(track_idx) {
+                                    eprintln!("[UI] Adding recorded clip to track {} at sample {}", track_idx, clip.start_time.samples);
+                                    track.arrangement.clips.push(clip);
+                                }
+                            }
+                        }
+                    };
+                }
 
                 ui.add_space(20.0);
                 if ui.button("💾 SAVE PROJECT").clicked() {
@@ -553,6 +595,13 @@ impl eframe::App for OmniApp {
                     self.param_states.clear();
                     
                     eprintln!("[UI] New Project Created");
+                }
+
+                ui.add_space(20.0);
+                let view_label = if self.show_arrangement_view { "VIEW: ARRANGEMENT" } else { "VIEW: SESSION" };
+                if ui.button(view_label).clicked() {
+                    self.show_arrangement_view = !self.show_arrangement_view;
+                    let _ = self.messenger.send(EngineCommand::SetArrangementMode(self.show_arrangement_view));
                 }
             });
 
@@ -633,7 +682,8 @@ impl eframe::App for OmniApp {
             ui.separator();
             ui.add_space(10.0);
 
-            if !self.plugin_params.is_empty() {
+            if !self.show_arrangement_view {
+                if !self.plugin_params.is_empty() {
                 ui.heading("Device View: CLAP Plugin");
                 ui.horizontal(|ui| {
                     if ui.button(egui::RichText::new("KILL PLUGIN (TEST)").color(egui::Color32::RED)).clicked() {
@@ -1485,6 +1535,20 @@ impl eframe::App for OmniApp {
 
                 } // End if selected_clip
             } // End if selected_track
+            } // End if !show_arrangement_view
+            else {
+                 self.arrangement_ui.show(
+                     ui,
+                     &mut self.tracks,
+                     self.bpm,
+                     &self.messenger,
+                     self.current_step,
+                     self.global_sample_pos,
+                     44100.0, // Fixed sample rate for UI vis
+                     self.engine.as_ref().map(|e| &e.audio_pool),
+                 );
+            }
+
             if self.engine.is_none() && self.is_playing {
                 ui.colored_label(egui::Color32::RED, "Engine failed to initialize");
             }

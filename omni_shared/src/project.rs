@@ -345,6 +345,73 @@ impl Default for Clip {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Timestamp {
+    pub samples: u64,       // Absolute position in samples
+    pub fractional: f64,    // Sub-sample precision for resampling
+}
+
+impl Default for Timestamp {
+    fn default() -> Self {
+        Self { samples: 0, fractional: 0.0 }
+    }
+}
+
+impl Timestamp {
+    pub fn new(samples: u64, fractional: f64) -> Self {
+        Self { samples, fractional }
+    }
+
+    pub fn zero() -> Self {
+        Self::default()
+    }
+    
+    pub fn from_seconds(seconds: f64, sample_rate: f64) -> Self {
+        let total_samples = seconds * sample_rate;
+        let samples = total_samples.floor() as u64;
+        let fractional = total_samples - samples as f64;
+        Self { samples, fractional }
+    }
+
+    pub fn as_seconds(&self, sample_rate: f64) -> f64 {
+        (self.samples as f64 + self.fractional) / sample_rate
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarpMarker {
+    pub source_sample: u64,
+    pub timeline_beat: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArrangementClip {
+    pub start_time: Timestamp, 
+    pub length: Timestamp,     
+    pub start_offset: Timestamp, 
+    pub source_id: u32,        // ID in Audio Pool (0 = none/midi?)
+    pub name: String,
+    pub selected: bool,
+    pub warp_markers: Vec<WarpMarker>,
+    
+    // Time Stretching
+    #[serde(default)]
+    pub stretch: bool,
+    #[serde(default)]
+    pub stretch_ratio: f32, // 1.0 = normal, 0.5 = half speed, 2.0 = double speed
+    #[serde(default = "default_bpm")]
+    pub original_bpm: f32,
+        
+    #[serde(skip)]
+    pub cached_id: Option<u32>, // Runtime ID of the stretched asset
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrackArrangement {
+    pub clips: Vec<ArrangementClip>,
+    // Automation curves will go here later
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub id: Uuid,
@@ -357,6 +424,7 @@ pub struct Track {
     pub clips: Vec<Clip>,
     pub active_clip_index: Option<usize>,
     pub parameters: HashMap<u32, f32>,
+    pub arrangement: TrackArrangement, // Added
 }
 
 impl Default for Track {
@@ -372,6 +440,7 @@ impl Default for Track {
             clips: vec![Clip::default(); 8], // 8 Clips per track (Matrix)
             active_clip_index: None,
             parameters: HashMap::new(),
+            arrangement: TrackArrangement::default(),
         }
     }
 }
@@ -381,6 +450,7 @@ pub struct Project {
     pub name: String,
     pub bpm: f32,
     pub tracks: Vec<Track>,
+    pub arrangement_mode: bool, // Added
 }
 
 impl Default for Project {
@@ -389,6 +459,9 @@ impl Default for Project {
             name: "New Project".to_string(),
             bpm: 120.0,
             tracks: Vec::new(),
+            arrangement_mode: false,
         }
     }
 }
+
+fn default_bpm() -> f32 { 120.0 }

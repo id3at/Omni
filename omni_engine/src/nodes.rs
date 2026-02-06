@@ -29,6 +29,9 @@ pub trait AudioNode: Send + Sync {
     /// Get last touched parameter (for learning)
     /// Returns: (param_id, value, generation)
     fn get_last_touched(&self) -> (u32, f32, u32) { (0, 0.0, 0) }
+
+    /// Get latency in samples
+    fn get_latency(&self) -> u32 { 0 }
 }
 
 pub struct SineNode {

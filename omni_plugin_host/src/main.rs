@@ -143,6 +143,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
                                     p.process_audio(slice, &[], &[], &[], header, &transport);
+                                    
+                                    // Update Latency
+                                    let latency = unsafe { p.get_latency() };
+                                    std::ptr::write_volatile(&mut header.latency, latency);
                                 } else {
                                      // Silence or passthrough (here we assume silence if no plugin)
                                      for s in slice.iter_mut() { *s = 0.0; }
@@ -167,6 +171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let guard = plugin_for_ipc.read().unwrap();
                                 if let Some(ref p) = *guard {
                                     p.process_audio(slice, &events, &[], &[], header, &transport);
+                                    
+                                    // Update Latency
+                                    let latency = unsafe { p.get_latency() };
+                                    std::ptr::write_volatile(&mut header.latency, latency);
                                 }
                             }
                          }
@@ -304,6 +312,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let guard = plugin_for_audio.read().unwrap();
                         if let Some(ref p) = *guard {
                             p.process_audio(slice, midi_slice, param_slice, expr_slice, header, &transport);
+
+                            // Update Latency
+                            let latency = unsafe { p.get_latency() };
+                            std::ptr::write_volatile(&mut header.latency, latency);
                         } else {
                             // Passthrough/Silence
                              for s in slice.iter_mut() { *s = 0.0; }

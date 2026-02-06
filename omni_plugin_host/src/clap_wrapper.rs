@@ -20,6 +20,7 @@ use clap_sys::ext::params::{clap_plugin_params, CLAP_EXT_PARAMS, clap_param_info
 use clap_sys::ext::gui::{clap_plugin_gui, CLAP_EXT_GUI, clap_window, CLAP_WINDOW_API_X11};
 use clap_sys::ext::timer_support::{clap_plugin_timer_support, clap_host_timer_support, CLAP_EXT_TIMER_SUPPORT};
 use clap_sys::ext::note_name::{clap_plugin_note_name, clap_note_name, CLAP_EXT_NOTE_NAME};
+use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
 use winit::window::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -669,7 +670,6 @@ impl ClapPlugin {
         }
     }
 
-    /// Query note names from the plugin using CLAP_EXT_NOTE_NAME extension
     pub unsafe fn get_note_names(&self) -> Vec<omni_shared::NoteNameInfo> {
         let note_name_ext = if let Some(get_ext) = (*self.plugin).get_extension {
             get_ext(self.plugin, CLAP_EXT_NOTE_NAME.as_ptr() as *const i8) as *const clap_plugin_note_name
@@ -708,4 +708,21 @@ impl ClapPlugin {
         eprintln!("[CLAP] Retrieved {} note names", result.len());
         result
     }
+
+    /// Get latency in samples
+    pub unsafe fn get_latency(&self) -> u32 {
+        let latency_ext = if let Some(get_ext) = (*self.plugin).get_extension {
+            get_ext(self.plugin, CLAP_EXT_LATENCY.as_ptr() as *const i8) as *const clap_plugin_latency
+        } else {
+            ptr::null()
+        };
+
+        if !latency_ext.is_null() {
+             if let Some(get) = (*latency_ext).get {
+                 return get(self.plugin);
+             }
+        }
+        0
+    }
 }
+

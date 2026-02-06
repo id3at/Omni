@@ -169,6 +169,7 @@ pub struct OmniShmemHeader {
     pub transport_bar_number: i32,   // Current bar number
     pub transport_time_sig_num: u16, // Time signature numerator
     pub transport_time_sig_denom: u16, // Time signature denominator
+    pub latency: u32, // Plugin Latency in samples
 }
 
 pub const SPIN_TIMEOUT_MS: u64 = 5; // Timeout for spin loop
