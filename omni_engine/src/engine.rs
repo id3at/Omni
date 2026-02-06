@@ -378,6 +378,19 @@ impl AudioEngine {
                                     let node_idx = graph.add_node(node);
                                     track_node_indices.push(node_idx);
                                 }
+
+                                
+                                // 4. Restore Plugin State
+                                for (t_idx, track) in project.tracks.iter().enumerate() {
+                                    if let Some(state_data) = &track.plugin_state {
+                                        if let Some(&node_idx) = track_node_indices.get(t_idx) {
+                                            if let Some(node) = graph.node_mut(node_idx) {
+                                                let _ = node.set_state(state_data.clone());
+                                                // eprintln!("[Engine] Restored state for track {}", t_idx);
+                                            }
+                                        }
+                                    }
+                                }
                                 eprintln!("[Engine] Loaded project state (Non-Blocking Swap)");
                             }
                             EngineCommand::ResetGraph => {
@@ -526,6 +539,25 @@ impl AudioEngine {
                                         // Let's pass it raw.
                                         let result = if touched.2 > 0 { Some(touched) } else { None };
                                         let _ = response_tx.send(result);
+                                    }
+                                }
+                            }
+                            EngineCommand::GetPluginState { track_index, response_tx } => {
+                                if let Some(&node_idx) = track_node_indices.get(track_index) {
+                                    if let Some(node) = graph.node_mut(node_idx) {
+                                        let state = node.get_state().ok();
+                                        let _ = response_tx.send(state);
+                                    } else {
+                                        let _ = response_tx.send(None);
+                                    }
+                                } else {
+                                    let _ = response_tx.send(None);
+                                }
+                            }
+                            EngineCommand::SetPluginState { track_index, data } => {
+                                if let Some(&node_idx) = track_node_indices.get(track_index) {
+                                    if let Some(node) = graph.node_mut(node_idx) {
+                                        let _ = node.set_state(data);
                                     }
                                 }
                             }

@@ -583,9 +583,19 @@ impl eframe::App for OmniApp {
                             let (tx, rx) = crossbeam_channel::bounded(1);
                             let _ = self.messenger.send(EngineCommand::GetProjectState(tx));
                             
-                            // Wait for state (Blocking UI is acceptable for Save Dialog context, or use Async/Defer)
-                            // For MVP Refactor, blocking 1ms is fine.
-                            if let Ok(project_state) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                            // Wait for state
+                            if let Ok(mut project_state) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                                    // Fetch Plugin States explicitly
+                                    for i in 0..project_state.tracks.len() {
+                                        if !project_state.tracks[i].plugin_path.is_empty() {
+                                            let (st_tx, st_rx) = crossbeam_channel::bounded(1);
+                                            let _ = self.messenger.send(EngineCommand::GetPluginState { track_index: i, response_tx: st_tx });
+                                            if let Ok(Some(state_data)) = st_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                                                project_state.tracks[i].plugin_state = Some(state_data);
+                                            }
+                                        }
+                                    }
+
                                     if let Err(e) = save_project_file(&project_state, path_str) {
                                         eprintln!("[UI] Error saving project: {}", e);
                                     } else {

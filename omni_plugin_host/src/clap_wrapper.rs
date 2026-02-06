@@ -21,6 +21,8 @@ use clap_sys::ext::gui::{clap_plugin_gui, CLAP_EXT_GUI, clap_window, CLAP_WINDOW
 use clap_sys::ext::timer_support::{clap_plugin_timer_support, clap_host_timer_support, CLAP_EXT_TIMER_SUPPORT};
 use clap_sys::ext::note_name::{clap_plugin_note_name, clap_note_name, CLAP_EXT_NOTE_NAME};
 use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
+use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
+use clap_sys::stream::{clap_istream, clap_ostream};
 use winit::window::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -200,6 +202,42 @@ unsafe extern "C" fn output_events_try_push(list: *const clap_output_events, eve
 
     true 
 }
+
+// --- CLAP STREAM IMPLEMENTATION ---
+
+struct InputMemoryStream<'a> {
+    data: &'a [u8],
+    position: usize,
+}
+
+unsafe extern "C" fn input_stream_read(stream: *const clap_istream, buffer: *mut c_void, size: u64) -> i64 {
+    let ctx = (*stream).ctx as *mut InputMemoryStream;
+    let data = &(*ctx).data;
+    let pos = (*ctx).position;
+    
+    let available = data.len() as u64 - pos as u64;
+    let to_read = size.min(available);
+    
+    if to_read > 0 {
+        std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), buffer as *mut u8, to_read as usize);
+        (*ctx).position += to_read as usize;
+    }
+    
+    to_read as i64
+}
+
+struct OutputMemoryStream {
+    data: Vec<u8>,
+}
+
+unsafe extern "C" fn output_stream_write(stream: *const clap_ostream, buffer: *const c_void, size: u64) -> i64 {
+    let ctx = (*stream).ctx as *mut OutputMemoryStream;
+    let slice = std::slice::from_raw_parts(buffer as *const u8, size as usize);
+    (*ctx).data.extend_from_slice(slice);
+    size as i64
+}
+
+// ----------------------------------
 
 impl ClapPlugin {
     pub unsafe fn load(path: &str, sample_rate: f64) -> Result<Self> {
@@ -723,6 +761,61 @@ impl ClapPlugin {
              }
         }
         0
+    }
+    pub unsafe fn get_state(&self) -> Result<Vec<u8>> {
+        let state_ext = if let Some(get_ext) = (*self.plugin).get_extension {
+            get_ext(self.plugin, CLAP_EXT_STATE.as_ptr() as *const i8) as *const clap_plugin_state
+        } else {
+            return Err(anyhow!("Plugin logic forbids state extension query"));
+        };
+
+        if state_ext.is_null() {
+             return Err(anyhow!("Plugin does not support CLAP_EXT_STATE"));
+        }
+        
+        if let Some(save) = (*state_ext).save {
+             let mut ctx = OutputMemoryStream { data: Vec::new() };
+             let stream = clap_ostream {
+                 ctx: &mut ctx as *mut _ as *mut c_void,
+                 write: Some(output_stream_write),
+             };
+             
+             if save(self.plugin, &stream) {
+                 return Ok(ctx.data);
+             } else {
+                 return Err(anyhow!("State save failed"));
+             }
+        }
+        
+        Err(anyhow!("State extension save function missing"))
+    }
+
+    pub unsafe fn set_state(&self, data: &[u8]) -> Result<()> {
+        let state_ext = if let Some(get_ext) = (*self.plugin).get_extension {
+            get_ext(self.plugin, CLAP_EXT_STATE.as_ptr() as *const i8) as *const clap_plugin_state
+        } else {
+             return Err(anyhow!("Logic error getting state ext"));
+        };
+
+        if state_ext.is_null() {
+             return Err(anyhow!("Plugin does not support CLAP_EXT_STATE"));
+        }
+
+        if let Some(load) = (*state_ext).load {
+             let mut ctx = InputMemoryStream { data, position: 0 };
+             let stream = clap_istream {
+                 ctx: &mut ctx as *mut _ as *mut c_void,
+                 read: Some(input_stream_read),
+             };
+             
+             if load(self.plugin, &stream) {
+                 return Ok(());
+             } else {
+                 return Err(anyhow!("State load failed"));
+             }
+        }
+        
+        Err(anyhow!("State extension load function missing"))
     }
 }
 

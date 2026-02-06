@@ -62,7 +62,16 @@ pub enum HostCommand {
     /// Open the plugin's native editor window
     OpenEditor,
     /// Request note names from plugin (CLAP note_name extension)
+    /// Request note names from plugin (CLAP note_name extension)
     GetNoteNames,
+    /// Request the full state of the plugin
+    GetState,
+    /// Restore the plugin state
+    SetState {
+        /// Base64 encoded or raw binary data depending on implementation. 
+        /// We use Vec<u8> in Rust struct, bincode handles it.
+        data: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -103,7 +112,11 @@ pub enum PluginEvent {
     ParamInfoList(Vec<ParamInfo>),
     /// Note name information list (from CLAP note_name extension or fallback)
     /// Contains: (clap_id, note_names) - clap_id allows host to apply hardcoded mappings
+    /// Note name information list (from CLAP note_name extension or fallback)
+    /// Contains: (clap_id, note_names) - clap_id allows host to apply hardcoded mappings
     NoteNameList { clap_id: String, names: Vec<NoteNameInfo> },
+    /// Return of the plugin State data
+    StateData(Vec<u8>),
 }
 
 /// Configuration for Shared Memory Region

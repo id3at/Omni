@@ -222,6 +222,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let _ = send_event(PluginEvent::NoteNameList { clap_id, names });
                 }
+                HostCommand::GetState => {
+                    let guard = plugin_for_ipc.read().unwrap();
+                    if let Some(ref p) = *guard {
+                        match unsafe { p.get_state() } {
+                             Ok(data) => {
+                                 let _ = send_event(PluginEvent::StateData(data));
+                             }
+                             Err(e) => {
+                                 let mut f = log_file.lock().unwrap();
+                                 let _ = writeln!(f, "[CMD] GetState Error: {}", e);
+                                 let _ = send_event(PluginEvent::Error(format!("GetState failed: {}", e)));
+                             }
+                        }
+                    } else {
+                        let _ = send_event(PluginEvent::Error("No plugin loaded".into()));
+                    }
+                }
+                HostCommand::SetState { data } => {
+                    let guard = plugin_for_ipc.read().unwrap();
+                     if let Some(ref p) = *guard {
+                        match unsafe { p.set_state(&data) } {
+                             Ok(_) => {
+                                 let mut f = log_file.lock().unwrap();
+                                 let _ = writeln!(f, "[CMD] SetState success ({} bytes)", data.len());
+                             }
+                             Err(e) => {
+                                 let mut f = log_file.lock().unwrap();
+                                 let _ = writeln!(f, "[CMD] SetState Error: {}", e);
+                                 let _ = send_event(PluginEvent::Error(format!("SetState failed: {}", e)));
+                             }
+                        }
+                    }
+                }
                 HostCommand::Shutdown => {
                     std::process::exit(0);
                 }
@@ -314,7 +347,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             p.process_audio(slice, midi_slice, param_slice, expr_slice, header, &transport);
 
                             // Update Latency
-                            let latency = unsafe { p.get_latency() };
+                            let latency = p.get_latency();
                             std::ptr::write_volatile(&mut header.latency, latency);
                         } else {
                             // Passthrough/Silence

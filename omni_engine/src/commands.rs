@@ -46,6 +46,10 @@ pub enum EngineCommand {
     // Returns (param_id, value, generation)
     GetLastTouchedParam { track_index: usize, response_tx: Sender<Option<(u32, f32, u32)>> },
     
+    // Plugin State Management
+    GetPluginState { track_index: usize, response_tx: Sender<Option<Vec<u8>>> },
+    SetPluginState { track_index: usize, data: Vec<u8> },
+    
     // Asset Management
     // UI Loads file, sends raw data. Engine adds to pool.
     AddAsset { name: String, data: Vec<f32>, source_sample_rate: f32, response_tx: Sender<Result<u32, String>> }, 

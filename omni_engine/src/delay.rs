@@ -2,18 +2,17 @@
 pub struct DelayLine {
     buffer: Vec<f32>,
     write_pos: usize,
-    sample_rate: f32,
 }
 
 impl DelayLine {
-    pub fn new(max_delay_samples: usize, sample_rate: f32) -> Self {
+    pub fn new(max_delay_samples: usize, _sample_rate: f32) -> Self {
         Self {
             buffer: vec![0.0; max_delay_samples],
             write_pos: 0,
-            sample_rate,
         }
     }
 
+    #[allow(dead_code)]
     pub fn process(&mut self, input: &[f32], output: &mut [f32], delay_samples: u32) {
         let n = input.len();
         let buffer_len = self.buffer.len();

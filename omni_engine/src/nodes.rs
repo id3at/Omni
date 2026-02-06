@@ -32,6 +32,12 @@ pub trait AudioNode: Send + Sync {
 
     /// Get latency in samples
     fn get_latency(&self) -> u32 { 0 }
+
+    /// Get plugin state (for plugins)
+    fn get_state(&mut self) -> Result<Vec<u8>, anyhow::Error> { Err(anyhow::anyhow!("Not supported")) }
+    
+    /// Set plugin state (for plugins)
+    fn set_state(&mut self, _data: Vec<u8>) -> Result<(), anyhow::Error> { Err(anyhow::anyhow!("Not supported")) }
 }
 
 pub struct SineNode {

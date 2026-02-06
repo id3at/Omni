@@ -303,7 +303,7 @@ impl AudioNode for PluginNode {
     }
 
     fn get_plugin_params(&mut self) -> Vec<omni_shared::ParamInfo> {
-        self.get_params().unwrap_or_default()
+        self.get_params_impl().unwrap_or_default()
     }
 
     fn simulate_crash(&mut self) {
@@ -318,38 +318,25 @@ impl AudioNode for PluginNode {
              if let Ok(serialized) = bincode::serialize(&cmd) {
                  let _ = writeln!(stdin, "{}", BASE64.encode(serialized));
                  let _ = stdin.flush();
-            }
+             }
         }
     }
 
     fn get_note_names(&mut self) -> (String, Vec<omni_shared::NoteNameInfo>) {
-        match self.query_note_names() {
-            Ok(result) => result,
-            Err(e) => {
-                eprintln!("[PluginNode] Failed to query note names from {}: {}", self.plugin_path, e);
-                (String::new(), Vec::new())
-            }
-        }
+        self.query_note_names_impl().unwrap_or((String::new(), Vec::new()))
     }
 
     fn get_last_touched(&self) -> (u32, f32, u32) {
-        unsafe {
-            let ptr = self.shmem.as_ptr();
-            let header = &*(ptr as *const OmniShmemHeader);
-            let p = std::ptr::read_volatile(&header.last_touched_param);
-            let v = std::ptr::read_volatile(&header.last_touched_value);
-            let g = std::ptr::read_volatile(&header.touch_generation);
-            (p, v, g)
-        }
+        self.get_last_touched_impl()
     }
 
     fn get_latency(&self) -> u32 {
-        self.get_latency()
+        self.get_latency_impl()
     }
 }
 
 impl PluginNode {
-    pub fn get_params(&mut self) -> Result<Vec<omni_shared::ParamInfo>, anyhow::Error> {
+    pub fn get_params_impl(&mut self) -> Result<Vec<omni_shared::ParamInfo>, anyhow::Error> {
         if let Some(stdin) = &mut self.stdin {
             let cmd = HostCommand::GetParamInfo;
             let serialized = bincode::serialize(&cmd)?;
@@ -371,7 +358,7 @@ impl PluginNode {
     }
 
     /// Query note names from plugin, returns (clap_id, note_names)
-    pub fn query_note_names(&mut self) -> Result<(String, Vec<omni_shared::NoteNameInfo>), anyhow::Error> {
+    pub fn query_note_names_impl(&mut self) -> Result<(String, Vec<omni_shared::NoteNameInfo>), anyhow::Error> {
         if let Some(stdin) = &mut self.stdin {
             let cmd = HostCommand::GetNoteNames;
             let serialized = bincode::serialize(&cmd)?;
@@ -391,7 +378,7 @@ impl PluginNode {
 
         Err(anyhow::anyhow!("Failed to get note names"))
     }
-    pub fn get_last_touched(&self) -> (u32, f32, u32) {
+    pub fn get_last_touched_impl(&self) -> (u32, f32, u32) {
         unsafe {
             let ptr = self.shmem.as_ptr();
             let header = &*(ptr as *const OmniShmemHeader);
@@ -402,11 +389,46 @@ impl PluginNode {
         }
     }
 
-    pub fn get_latency(&self) -> u32 {
+    pub fn get_latency_impl(&self) -> u32 {
         unsafe {
             let ptr = self.shmem.as_ptr();
             let header = &*(ptr as *const OmniShmemHeader);
             std::ptr::read_volatile(&header.latency)
         }
+    }
+
+    pub fn get_state_impl(&mut self) -> Result<Vec<u8>, anyhow::Error> {
+        if let Some(stdin) = &mut self.stdin {
+            let cmd = HostCommand::GetState;
+            let serialized = bincode::serialize(&cmd)?;
+            writeln!(stdin, "{}", BASE64.encode(serialized))?;
+            stdin.flush()?;
+        }
+
+        if let Some(reader) = &mut self.reader {
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            let decoded = BASE64.decode(line.trim())?;
+            let event: PluginEvent = bincode::deserialize(&decoded)?;
+            if let PluginEvent::StateData(data) = event {
+                return Ok(data);
+            } else if let PluginEvent::Error(e) = event {
+                return Err(anyhow::anyhow!("Plugin Error: {}", e));
+            }
+        }
+        
+        Err(anyhow::anyhow!("Failed to get plugin state"))
+    }
+    
+    pub fn set_state_impl(&mut self, data: Vec<u8>) -> Result<(), anyhow::Error> {
+        if let Some(stdin) = &mut self.stdin {
+            let cmd = HostCommand::SetState { data };
+            let serialized = bincode::serialize(&cmd)?;
+            writeln!(stdin, "{}", BASE64.encode(serialized))?;
+            stdin.flush()?;
+            // Fire-and-forget, assuming success if no crash.
+            return Ok(());
+        }
+        Err(anyhow::anyhow!("No active plugin connection"))
     }
 }

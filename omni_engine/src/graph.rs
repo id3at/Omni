@@ -64,7 +64,27 @@ impl AudioGraph {
         let buffer_size = omni_shared::BUFFER_SIZE * omni_shared::CHANNEL_COUNT; // 512 * 2 = 1024
         self.buffers.resize(self.chains.len(), vec![0.0; buffer_size]);
         
+        
         println!("[AudioGraph] Schedule updated. Chains: {}", self.chains.len());
+    }
+
+    pub fn calculate_latencies(&self) -> (Vec<u32>, u32) {
+        let mut track_latencies = Vec::new();
+        let mut max_latency = 0;
+
+        for chain in &self.chains {
+            let mut total = 0;
+            for &idx in chain {
+                if let Some(node) = self.graph.node_weight(idx) {
+                    total += node.get_latency();
+                }
+            }
+            track_latencies.push(total);
+            if total > max_latency {
+                max_latency = total;
+            }
+        }
+        (track_latencies, max_latency)
     }
 
     /// Parallel processing of specific nodes with provided buffers and events.

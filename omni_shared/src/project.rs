@@ -424,7 +424,10 @@ pub struct Track {
     pub clips: Vec<Clip>,
     pub active_clip_index: Option<usize>,
     pub parameters: HashMap<u32, f32>,
-    pub arrangement: TrackArrangement, // Added
+    pub arrangement: TrackArrangement,
+    
+    #[serde(default)]
+    pub plugin_state: Option<Vec<u8>>,
 }
 
 impl Default for Track {
@@ -441,6 +444,7 @@ impl Default for Track {
             active_clip_index: None,
             parameters: HashMap::new(),
             arrangement: TrackArrangement::default(),
+            plugin_state: None,
         }
     }
 }
