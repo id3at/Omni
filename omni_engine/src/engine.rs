@@ -415,13 +415,41 @@ impl AudioEngine {
                                 }
 
                                 
-                                // 4. Restore Plugin State
+                                // 4. Restore Plugin State (Blob)
                                 for (t_idx, track) in project.tracks.iter().enumerate() {
                                     if let Some(state_data) = &track.plugin_state {
                                         if let Some(&node_idx) = track_node_indices.get(t_idx) {
                                             if let Some(node) = graph.node_mut(node_idx) {
                                                 let _ = node.set_state(state_data.clone());
-                                                // eprintln!("[Engine] Restored state for track {}", t_idx);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 5. Restore Plugin Parameters (Individual)
+                                // Resize local_param_events to match new track count
+                                if local_param_events.len() < project.tracks.len() {
+                                    local_param_events.resize(project.tracks.len(), Vec::new());
+                                }
+
+                                for (t_idx, track) in project.tracks.iter().enumerate() {
+                                    if !track.parameters.is_empty() {
+                                        if let Some(&node_idx) = track_node_indices.get(t_idx) {
+                                            if let Some(node) = graph.node_mut(node_idx) {
+                                                for (&id, &val) in &track.parameters {
+                                                    // 1. Update Node Cache (for resurrection)
+                                                    node.set_param(id, val);
+                                                    
+                                                    // 2. Queue for Immediate Processing
+                                                    if t_idx < local_param_events.len() {
+                                                        local_param_events[t_idx].push(omni_shared::ParameterEvent {
+                                                            param_id: id,
+                                                            value: val as f64,
+                                                            sample_offset: 0,
+                                                        });
+                                                    }
+                                                }
+                                                // eprintln!("[Engine] Restored {} params for track {}", track.parameters.len(), t_idx);
                                             }
                                         }
                                     }

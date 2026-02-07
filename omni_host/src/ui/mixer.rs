@@ -142,6 +142,7 @@ pub fn show_track_controls(
                         });
                         
                         track.name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Plugin").to_string();
+                        track.plugin_path = path.to_str().unwrap_or("").to_string();
                         track.valid_notes = None;
                 }
             }

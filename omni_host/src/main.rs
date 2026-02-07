@@ -511,7 +511,10 @@ impl eframe::App for OmniApp {
                 save_resp.clone().on_hover_text("Save Project");
                 if save_resp.clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Omni Project", &["omni"]).save_file() {
-                        let path_str = path.to_string_lossy().to_string();
+                        let mut path_str = path.to_string_lossy().to_string();
+                        if !path_str.ends_with(".omni") {
+                            path_str.push_str(".omni");
+                        }
                         
                         let mut track_plugin_states = Vec::new();
                         for (i, _track) in self.tracks.iter().enumerate() {

@@ -23,33 +23,44 @@ unsafe impl Send for PluginNode {}
 
 impl PluginNode {
     fn find_plugin_host() -> Result<std::path::PathBuf, anyhow::Error> {
-        // 1. Check same directory as executable (Production/Deployment)
-        if let Ok(mut path) = std::env::current_exe() {
-            path.pop(); // Remove executable name
-            path.push("omni_plugin_host");
-            if path.exists() {
-                return Ok(path);
+        let mut tried_paths = Vec::new();
+
+        // 1. Check relative to executable (Production/Deployment/Cargo Run)
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(parent) = exe_path.parent() {
+                // A. Sibling (Deployment)
+                let path = parent.join("omni_plugin_host");
+                if path.exists() { return Ok(path); }
+                tried_paths.push(path);
+
+                // B. Parent (Cargo Run: target/debug/deps/ -> target/debug/)
+                if let Some(grandparent) = parent.parent() {
+                     let path = grandparent.join("omni_plugin_host");
+                     if path.exists() { return Ok(path); }
+                     tried_paths.push(path);
+                }
             }
         }
 
-        // 2. Check Standard Cargo Target dirs (Development)
-        // Check for release binary first if in release mode or if debug missing
-        let release_path = std::path::Path::new("./target/release/omni_plugin_host");
-        let debug_path = std::path::Path::new("./target/debug/omni_plugin_host");
+        // 2. Check Standard Cargo Target dirs (Development) relative to CWD
+        let release_path = std::path::Path::new("target/release/omni_plugin_host");
+        let debug_path = std::path::Path::new("target/debug/omni_plugin_host");
 
-        if !cfg!(debug_assertions) && release_path.exists() {
-             return Ok(release_path.to_path_buf());
-        }
-        
-        if debug_path.exists() {
-            return Ok(debug_path.to_path_buf());
+        // Order depends on build mode, but check both
+        if !cfg!(debug_assertions) {
+            if release_path.exists() { return Ok(release_path.to_path_buf()); }
+            tried_paths.push(release_path.to_path_buf());
         }
 
-        if release_path.exists() {
-             return Ok(release_path.to_path_buf());
+        if debug_path.exists() { return Ok(debug_path.to_path_buf()); }
+        tried_paths.push(debug_path.to_path_buf());
+
+        if release_path.exists() { return Ok(release_path.to_path_buf()); }
+        if !tried_paths.contains(&release_path.to_path_buf()) {
+             tried_paths.push(release_path.to_path_buf());
         }
 
-        Err(anyhow::anyhow!("Could not find omni_plugin_host binary! Tried current dir, target/debug, and target/release."))
+        Err(anyhow::anyhow!("Could not find omni_plugin_host binary! Checked: {:?}", tried_paths))
     }
 
     pub fn new(plugin_path: &str, sample_rate: f64) -> Result<Self, anyhow::Error> {
