@@ -13,6 +13,9 @@ pub struct PianoRollState {
     pub drag_original_note: Option<omni_shared::project::Note>,
     pub drag_accumulated_delta: egui::Vec2,
     pub last_note_length: f64,
+    // Loop marker drag state
+    pub loop_drag_original: Option<f64>,
+    pub loop_drag_accumulated: f32,
 }
 
 impl Default for PianoRollState {
@@ -25,6 +28,8 @@ impl Default for PianoRollState {
             drag_original_note: None,
             drag_accumulated_delta: egui::Vec2::ZERO,
             last_note_length: 0.25,
+            loop_drag_original: None,
+            loop_drag_accumulated: 0.0,
         }
     }
 }
@@ -107,16 +112,20 @@ pub fn show_piano_roll(
         
         let piano_height = (available_size.y).max(200.0);
         
-        let (piano_rect, response) = ui.allocate_at_least(
+        // Use Sense::hover() for main rect - we handle specific interactions manually
+        // This prevents the main rect from "stealing" drag events from child elements like loop marker
+        let (piano_rect, _response) = ui.allocate_at_least(
             egui::vec2(available_size.x, piano_height),
-            egui::Sense::click_and_drag()
+            egui::Sense::hover()
         );
         
         let painter = ui.painter_at(piano_rect);
         let mut note_interacted_this_frame = false;
         
         // 2. Input Handling (Navigation - relative to piano_rect)
-        let (scroll_delta, modifiers) = ui.input(|i| (i.raw_scroll_delta, i.modifiers));
+        let (scroll_delta, modifiers, pointer_delta, middle_down) = ui.input(|i| {
+            (i.raw_scroll_delta, i.modifiers, i.pointer.delta(), i.pointer.middle_down())
+        });
         
         if ui.rect_contains_pointer(piano_rect) {
             // Zoom (Ctrl + Scroll)
@@ -125,16 +134,17 @@ pub fn show_piano_roll(
                     state.zoom_x = (state.zoom_x + scroll_delta.y * 0.1).clamp(10.0, 200.0);
                 }
             } else {
-                // Pan (Scroll Wheel or Middle Drag)
-                    if scroll_delta.x != 0.0 || scroll_delta.y != 0.0 {
+                // Pan (Scroll Wheel)
+                if scroll_delta.x != 0.0 || scroll_delta.y != 0.0 {
                     state.scroll_x -= scroll_delta.x;
                     state.scroll_y -= scroll_delta.y; 
                 }
             }
-        }
-        if response.dragged_by(egui::PointerButton::Middle) {
-                state.scroll_x -= response.drag_delta().x;
-                state.scroll_y -= response.drag_delta().y;
+            // Middle mouse drag for panning
+            if middle_down {
+                state.scroll_x -= pointer_delta.x;
+                state.scroll_y -= pointer_delta.y;
+            }
         }
 
         // Clip Canvas
@@ -160,8 +170,8 @@ pub fn show_piano_roll(
         // Visualize Loop End & Handle Interaction
         let loop_x = piano_rect.left() + (clip.length as f32 * beat_width) - state.scroll_x;
         
-        // Interaction Layer for Loop Marker
-        let marker_hit_width = 10.0;
+        // Interaction Layer for Loop Marker - with wider hit area for better grabbing
+        let marker_hit_width = 16.0;
         if loop_x > piano_rect.left() - marker_hit_width && loop_x < piano_rect.right() + marker_hit_width {
             let marker_rect = egui::Rect::from_min_size(
                 egui::pos2(loop_x - marker_hit_width/2.0, piano_rect.top()), 
@@ -170,22 +180,35 @@ pub fn show_piano_roll(
             
             let marker_response = ui.allocate_rect(marker_rect, egui::Sense::drag());
             
-            // Cursor
+            // Show resize cursor
             if marker_response.hovered() || marker_response.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
 
-            // Drag Logic
+            // Start drag - remember original value
+            if marker_response.drag_started() {
+                state.loop_drag_original = Some(clip.length);
+                state.loop_drag_accumulated = 0.0;
+            }
+            
+            // During drag - accumulate delta, apply snap only to output
             if marker_response.dragged() {
-                    let delta_beats = marker_response.drag_delta().x / beat_width;
-                    clip.length = (clip.length + delta_beats as f64).max(1.0); 
+                if let Some(original) = state.loop_drag_original {
+                    // Accumulate pixel delta
+                    state.loop_drag_accumulated += marker_response.drag_delta().x;
                     
-                    // Snap (Shift to disable)
-                    if !ui.input(|i| i.modifiers.shift) {
-                        let snap = 1.0; 
-                        clip.length = (clip.length / snap).round() * snap;
-                        if clip.length < snap { clip.length = snap; }
-                    }
+                    // Calculate new length from original + accumulated
+                    let delta_beats = state.loop_drag_accumulated / beat_width;
+                    let raw_length = (original + delta_beats as f64).max(1.0);
+                    
+                    // Snap only the final value (Shift to disable)
+                    clip.length = if !ui.input(|i| i.modifiers.shift) {
+                        let snap = 1.0;
+                        (raw_length / snap).round() * snap
+                    } else {
+                        raw_length
+                    };
+                    if clip.length < 1.0 { clip.length = 1.0; }
                     
                     let _ = sender.send(EngineCommand::SetClipLength {
                         track_index: track_idx,
@@ -196,6 +219,13 @@ pub fn show_piano_roll(
                         track_index: track_idx,
                         clip_index: clip_idx,
                     });
+                }
+            }
+            
+            // End drag - clear state
+            if marker_response.drag_stopped() {
+                state.loop_drag_original = None;
+                state.loop_drag_accumulated = 0.0;
             }
         }
 
