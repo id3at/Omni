@@ -850,11 +850,18 @@ impl eframe::App for OmniApp {
                 ui.horizontal(|ui| {
                     // MASTER SCENE COLUMN
                     ui.vertical(|ui| {
-                        ui.heading("Master");
+                        let (rect, _resp) = ui.allocate_exact_size(egui::vec2(90.0, 30.0), egui::Sense::hover());
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Master",
+                            egui::FontId::proportional(18.0), // Heading size
+                            egui::Color32::WHITE,
+                        );
                         ui.add_space(5.0);
                         
                         for scene_idx in 0..8 {
-                            let btn_size = egui::vec2(60.0, 30.0); // Match Track Clip height (30.0)
+                            let btn_size = egui::vec2(90.0, 30.0); // Match Track Clip height (30.0) & Width (90.0) -> Fixed
                             let btn = egui::Button::new(format!("Scene {}", scene_idx + 1));
                             
                             // Scene Button
@@ -881,8 +888,23 @@ impl eframe::App for OmniApp {
                         ui.push_id(track_idx, |ui| {
                             ui.vertical(|ui| {
                                 ui.set_width(90.0); // Fixed width for Compact Layout (appx 4 buttons * 22px)
-                            // Track Header
-                            ui.label(egui::RichText::new(&track.name).strong());
+                            // Track Header - Fixed Height Area
+                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(90.0, 30.0), egui::Sense::click());
+                            let bg_color = if resp.hovered() { egui::Color32::from_gray(30) } else { egui::Color32::TRANSPARENT };
+                            ui.painter().rect_filled(rect, 2.0, bg_color);
+                            
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                &track.name,
+                                egui::TextStyle::Body.resolve(ui.style()), 
+                                egui::Color32::WHITE,
+                            );
+                            
+                            if resp.clicked() {
+                                self.selected_track = track_idx;
+                            }
+                            ui.add_space(5.0); // Exact match with Master column
                             
                             // 1. Clips (Top of Strip) - Matches Master Scene buttons
                             for (clip_idx, clip) in track.clips.iter_mut().enumerate() {
