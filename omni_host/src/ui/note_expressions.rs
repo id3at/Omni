@@ -2,7 +2,7 @@ use eframe::egui;
 use crossbeam_channel::Sender;
 use omni_engine::EngineCommand;
 use crate::TrackData;
-use crate::ui::piano_roll::{PianoRollState, ExpressionMode};
+use crate::ui::piano_roll::{PianoRollState, ExpressionMode, PianoRollTheme};
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -99,12 +99,27 @@ pub fn show(
         painter.rect_filled(rect, 0.0, crate::ui::theme::THEME.bg_dark.gamma_multiply(0.5));
         
         let beat_width = state.zoom_x;
+        let keyboard_width = 40.0;
+        
+        let theme = PianoRollTheme::default();
+        
+        // Draw gutter to match piano keys
+        let gutter_rect = egui::Rect::from_min_size(rect.min, egui::vec2(keyboard_width, rect.height()));
+        painter.rect_filled(gutter_rect, 0.0, theme.bg_color.gamma_multiply(0.8));
+        painter.line_segment([gutter_rect.right_top(), gutter_rect.right_bottom()], (1.0, theme.grid_line_primary));
+        
+        // Clip content to avoid drawing over gutter
+        let content_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + keyboard_width, rect.top()),
+            rect.max
+        );
+        let bar_painter = painter.with_clip_rect(content_rect);
         
         // Allocate the ENTIRE lane area ONCE (not per note!)
         let lane_response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         
         for note in clip.notes.iter_mut() {
-            let x = rect.left() + (note.start as f32 * beat_width) - state.scroll_x;
+            let x = rect.left() + keyboard_width + (note.start as f32 * beat_width) - state.scroll_x;
             let w = (note.duration as f32 * beat_width).max(4.0);
             
             if x + w > rect.left() && x < rect.right() {
@@ -124,7 +139,7 @@ pub fn show(
                 
                 let color = if note.selected { crate::ui::theme::THEME.accent_primary } else { crate::ui::theme::THEME.note_bg };
                 
-                painter.rect_filled(bar_rect, 2.0, color);
+                bar_painter.rect_filled(bar_rect, 2.0, color);
                 
                 // Check interaction using pointer position (no allocate_rect!)
                 let bar_hovered = ui.input(|i| {

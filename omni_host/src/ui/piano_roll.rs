@@ -30,7 +30,40 @@ const LOOP_MARKER_HIT_WIDTH: f32 = 16.0;
 const MIN_NOTE_DURATION: f64 = 0.125;
 const DEFAULT_VELOCITY: u8 = 100;
 
+// ============================================================================
+// THEME
+// ============================================================================
 
+#[derive(Clone, Copy)]
+pub struct PianoRollTheme {
+    pub bg_color: egui::Color32,
+    pub grid_line_primary: egui::Color32,
+    pub grid_line_secondary: egui::Color32,
+    pub white_key_color: egui::Color32,
+    pub black_key_color: egui::Color32,
+    pub note_color: egui::Color32,
+    pub note_selected_color: egui::Color32,
+    pub playhead_color: egui::Color32,
+    pub loop_marker_color: egui::Color32,
+    pub text_color: egui::Color32,
+}
+
+impl Default for PianoRollTheme {
+    fn default() -> Self {
+        Self {
+            bg_color: crate::ui::theme::THEME.bg_dark,
+            grid_line_primary: crate::ui::theme::THEME.grid_line,
+            grid_line_secondary: crate::ui::theme::THEME.grid_line.gamma_multiply(0.5),
+            white_key_color: crate::ui::theme::THEME.piano_key_white,
+            black_key_color: crate::ui::theme::THEME.piano_key_black,
+            note_color: crate::ui::theme::THEME.note_bg,
+            note_selected_color: crate::ui::theme::THEME.accent_primary,
+            playhead_color: egui::Color32::RED,
+            loop_marker_color: crate::ui::theme::THEME.accent_secondary,
+            text_color: egui::Color32::GRAY,
+        }
+    }
+}
 // ============================================================================
 // ENUMS
 // ============================================================================
@@ -80,6 +113,32 @@ enum NoteAction {
     SelectExclusive,
 }
 
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
+pub enum PianoRollTool {
+    #[default]
+    Select,
+    Pencil,
+    Eraser,
+}
+
+impl PianoRollTool {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Select => "Select",
+            Self::Pencil => "Pencil",
+            Self::Eraser => "Eraser",
+        }
+    }
+    
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Select => "⬚",
+            Self::Pencil => "✏",
+            Self::Eraser => "⌫",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ExpressionMode {
     Velocity,
@@ -114,6 +173,8 @@ pub struct PianoRollState {
     pub pending_undo: bool,
     // Active expression lane mode
     pub expression_mode: ExpressionMode,
+    // Active tool
+    pub current_tool: PianoRollTool,
 }
 
 impl Default for PianoRollState {
@@ -135,6 +196,7 @@ impl Default for PianoRollState {
             redo_stack: Vec::new(),
             pending_undo: false,
             expression_mode: ExpressionMode::Velocity,
+            current_tool: PianoRollTool::default(),
         }
     }
 }
@@ -310,6 +372,20 @@ pub fn show_piano_roll(
             // TOOLBAR
             // ================================================================
             ui.horizontal(|ui| {
+                // Tool Selector
+                ui.label("Tool:");
+                for tool in [PianoRollTool::Select, PianoRollTool::Pencil, PianoRollTool::Eraser] {
+                    let is_selected = state.current_tool == tool;
+                    let btn = egui::Button::new(format!("{} {}", tool.icon(), tool.label()))
+                        .fill(if is_selected { crate::ui::theme::THEME.accent_primary } else { crate::ui::theme::THEME.bg_dark });
+                    if ui.add(btn).clicked() {
+                        state.current_tool = tool;
+                    }
+                }
+                
+                ui.separator();
+                
+                // Snap Grid
                 ui.label("Snap:");
                 for grid in SnapGrid::all() {
                     let is_selected = state.snap_grid == *grid;
@@ -321,13 +397,18 @@ pub fn show_piano_roll(
                 }
                 
                 ui.separator();
-                ui.label("Keys: Del=Delete | Ctrl+A=All | Ctrl+D=Duplicate | Ctrl+Z=Undo");
+                ui.label("1/2/3=Tools | Del=Delete | Ctrl+Z=Undo");
             });
             
             // ================================================================
             // KEYBOARD SHORTCUTS
             // ================================================================
             ui.input(|i| {
+                // Tool switching (1=Select, 2=Pencil, 3=Eraser)
+                if i.key_pressed(egui::Key::Num1) { state.current_tool = PianoRollTool::Select; }
+                if i.key_pressed(egui::Key::Num2) { state.current_tool = PianoRollTool::Pencil; }
+                if i.key_pressed(egui::Key::Num3) { state.current_tool = PianoRollTool::Eraser; }
+                
                 // Delete selected notes
                 if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
                     delete_selected_notes(clip, sender, track_idx, clip_idx, state);
@@ -458,26 +539,74 @@ pub fn show_piano_roll(
 
         // Clip Canvas
         let painter = painter.with_clip_rect(piano_rect);
+        let theme = PianoRollTheme::default();
         
         // Draw Background
-        painter.rect_filled(piano_rect, 0.0, crate::ui::theme::THEME.bg_dark);
+        painter.rect_filled(piano_rect, 0.0, theme.bg_color);
         
-        // 3. Draw Background (Time Grid)
+        // 3. Draw Background (Time Grid) with visual hierarchy
         let beat_width = state.zoom_x;
-        let start_beat = (state.scroll_x / beat_width).max(0.0);
-        let end_beat = start_beat + (piano_rect.width() / beat_width);
+        let keyboard_width = 40.0f32; // Width of the piano keyboard on the left - defined early for grid
+        let grid_left = piano_rect.left() + keyboard_width; // Grid starts after keyboard
+        let grid_width = piano_rect.width() - keyboard_width;
         
-        // Draw Beats
+        let start_beat = (state.scroll_x / beat_width).max(0.0);
+        let end_beat = start_beat + (grid_width / beat_width);
+        
+        // Draw sub-beats first (finest grid) - only if zoomed in enough
+        if beat_width >= 40.0 {
+            let snap_value = state.snap_grid.value().unwrap_or(0.25);
+            if snap_value < 1.0 {
+                let sub_beat_step = snap_value;
+                let start_sub = ((start_beat as f64) / sub_beat_step).floor() * sub_beat_step;
+                let mut sub = start_sub;
+                while sub <= end_beat as f64 {
+                    let x = grid_left + (sub as f32 * beat_width) - state.scroll_x;
+                    if x >= grid_left && x <= piano_rect.right() {
+                        // Skip if it's a beat or bar line (will be drawn later)
+                        if (sub * 4.0).fract().abs() > 0.001 {
+                            painter.line_segment(
+                                [egui::pos2(x, piano_rect.top()), egui::pos2(x, piano_rect.bottom())],
+                                (1.0, theme.grid_line_secondary.gamma_multiply(0.3))
+                            );
+                        }
+                    }
+                    sub += sub_beat_step;
+                }
+            }
+        }
+        
+        // Draw Beats (medium lines)
         for b in (start_beat as usize)..(end_beat as usize + 1) {
-            let x = piano_rect.left() + (b as f32 * beat_width) - state.scroll_x;
-            if x >= piano_rect.left() && x <= piano_rect.right() {
-                let color = if b % 4 == 0 { crate::ui::theme::THEME.grid_line } else { crate::ui::theme::THEME.grid_line.gamma_multiply(0.5) };
-                painter.line_segment([egui::pos2(x, piano_rect.top()), egui::pos2(x, piano_rect.bottom())], (1.0, color));
+            let x = grid_left + (b as f32 * beat_width) - state.scroll_x;
+            if x >= grid_left && x <= piano_rect.right() {
+                let is_bar = b % 4 == 0;
+                if is_bar {
+                    // Bar line (thick, bright)
+                    painter.line_segment(
+                        [egui::pos2(x, piano_rect.top()), egui::pos2(x, piano_rect.bottom())],
+                        (2.0, theme.grid_line_primary)
+                    );
+                    // Bar number label
+                    painter.text(
+                        egui::pos2(x + 3.0, piano_rect.top() + 2.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("{}", b / 4 + 1),
+                        egui::FontId::proportional(10.0),
+                        theme.text_color.gamma_multiply(0.7)
+                    );
+                } else {
+                    // Beat line (thin)
+                    painter.line_segment(
+                        [egui::pos2(x, piano_rect.top()), egui::pos2(x, piano_rect.bottom())],
+                        (1.0, theme.grid_line_secondary)
+                    );
+                }
             }
         }
         
         // Visualize Loop End & Handle Interaction
-        let loop_x = piano_rect.left() + (clip.length as f32 * beat_width) - state.scroll_x;
+        let loop_x = grid_left + (clip.length as f32 * beat_width) - state.scroll_x;
         
         // Interaction Layer for Loop Marker - with wider hit area for better grabbing
         if loop_x > piano_rect.left() - LOOP_MARKER_HIT_WIDTH && loop_x < piano_rect.right() + LOOP_MARKER_HIT_WIDTH {
@@ -538,7 +667,7 @@ pub fn show_piano_roll(
         }
 
         // Draw Loop Visuals (Background dimming + Line)
-        let draw_loop_x = piano_rect.left() + (clip.length as f32 * beat_width) - state.scroll_x;
+        let draw_loop_x = grid_left + (clip.length as f32 * beat_width) - state.scroll_x;
         
         if draw_loop_x < piano_rect.right() {
             // Dimmed area outside loop
@@ -553,7 +682,7 @@ pub fn show_piano_roll(
             // Loop Line
             painter.line_segment(
                 [egui::pos2(draw_loop_x, piano_rect.top()), egui::pos2(draw_loop_x, piano_rect.bottom())],
-                (2.0, crate::ui::theme::THEME.accent_secondary)
+                (2.0, theme.loop_marker_color)
             );
             
             // Label
@@ -566,52 +695,78 @@ pub fn show_piano_roll(
             );
         }
 
-        // 4. Draw Background (Pitch Grid)
+        // 4. Draw Background (Pitch Grid) + Piano Keyboard Ruler
         let note_height = state.zoom_y;
         
-        for note in 0..128 {
+        for note in 0..128u8 {
             let y = piano_rect.top() + ((127 - note) as f32 * note_height) - state.scroll_y;
             
             if y >= piano_rect.top() - note_height && y <= piano_rect.bottom() {
-                    // Check if this note is valid for the plugin
-                    let is_valid_note = match valid_notes {
-                        None => true, 
-                        Some(keys) => keys.contains(&(note as i16)),
-                    };
+                // Check if this note is valid for the plugin
+                let is_valid_note = match valid_notes {
+                    None => true, 
+                    Some(keys) => keys.contains(&(note as i16)),
+                };
+                
+                // Black keys
+                let is_black = matches!(note % 12, 1 | 3 | 6 | 8 | 10);
+                
+                // --- Draw lane background (right of keyboard) ---
+                let lane_rect = egui::Rect::from_min_size(
+                    egui::pos2(piano_rect.left() + keyboard_width, y), 
+                    egui::vec2(piano_rect.width() - keyboard_width, note_height)
+                );
+                
+                let lane_color = if !is_valid_note {
+                    theme.black_key_color.gamma_multiply(0.3)
+                } else if is_black {
+                    theme.black_key_color.gamma_multiply(0.6)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                
+                if lane_color != egui::Color32::TRANSPARENT {
+                    painter.rect_filled(lane_rect, 0.0, lane_color);
+                }
+                
+                // Draw horizontal line
+                painter.line_segment(
+                    [egui::pos2(piano_rect.left() + keyboard_width, y), egui::pos2(piano_rect.right(), y)], 
+                    (1.0, theme.grid_line_secondary.gamma_multiply(0.5))
+                );
+                
+                // --- Draw piano key on the left ---
+                let key_rect = egui::Rect::from_min_size(
+                    egui::pos2(piano_rect.left(), y), 
+                    egui::vec2(keyboard_width, note_height)
+                );
+                
+                if is_black {
+                    // Black key: narrower, dark
+                    let black_key_rect = egui::Rect::from_min_size(
+                        egui::pos2(piano_rect.left(), y), 
+                        egui::vec2(keyboard_width * 0.65, note_height)
+                    );
+                    painter.rect_filled(black_key_rect, 2.0, egui::Color32::from_rgb(30, 30, 35));
+                    painter.rect_stroke(black_key_rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 55)), egui::StrokeKind::Inside);
+                } else {
+                    // White key: full width, light
+                    painter.rect_filled(key_rect, 0.0, egui::Color32::from_rgb(220, 220, 225));
+                    painter.rect_stroke(key_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 180, 185)), egui::StrokeKind::Inside);
                     
-                    // Black keys background
-                    let is_black = matches!(note % 12, 1 | 3 | 6 | 8 | 10);
-                    
-                    let bg_color = if !is_valid_note {
-                        // Invalid notes: dim red tint
-                        crate::ui::theme::THEME.piano_key_black.gamma_multiply(0.5).linear_multiply(0.5) // Approximate invalid
-                    } else if is_black {
-                        crate::ui::theme::THEME.piano_key_black
-                    } else {
-                        crate::ui::theme::THEME.piano_key_white.gamma_multiply(0.1) // Slight tint for white keys if needed, or transparent
-                    };
-                    
-                    if bg_color != egui::Color32::TRANSPARENT {
-                        painter.rect_filled(
-                            egui::Rect::from_min_size(egui::pos2(piano_rect.left(), y), egui::vec2(piano_rect.width(), note_height)),
-                            0.0,
-                            bg_color
-                        );
-                    }
-                    
-                    painter.line_segment([egui::pos2(piano_rect.left(), y), egui::pos2(piano_rect.right(), y)], (1.0, crate::ui::theme::THEME.grid_line));
-                    
-                    // Label C notes
+                    // Draw label on C notes
                     if note % 12 == 0 {
-                        let label_color = if is_valid_note { egui::Color32::GRAY } else { egui::Color32::from_rgb(80, 50, 50) };
+                        let octave = (note as i32 / 12) - 1;
+                        let label_color = if is_valid_note { egui::Color32::from_rgb(60, 60, 65) } else { egui::Color32::from_rgb(150, 80, 80) };
                         painter.text(
-                            egui::pos2(piano_rect.left() + 2.0, y + note_height/2.0),
+                            egui::pos2(piano_rect.left() + 3.0, y + note_height / 2.0),
                             egui::Align2::LEFT_CENTER,
-                            format!("C{}", note / 12 - 3),
-                            egui::FontId::proportional(10.0),
+                            format!("C{}", octave),
+                            egui::FontId::proportional(9.0),
                             label_color
                         );
                     }
+                }
             }
         }
         
@@ -626,7 +781,7 @@ pub fn show_piano_roll(
 
         // Use a loop index since we might modify collection if we deleted, but we only record actions here
         for (idx, note) in clip.notes.iter_mut().enumerate() {
-            let x = piano_rect.left() + (note.start as f32 * beat_width) - state.scroll_x;
+            let x = piano_rect.left() + keyboard_width + (note.start as f32 * beat_width) - state.scroll_x;
             let y = piano_rect.top() + ((127 - note.key) as f32 * note_height) - state.scroll_y;
             let w = note.duration as f32 * beat_width;
             let h = note_height - 1.0;
@@ -635,24 +790,53 @@ pub fn show_piano_roll(
             if x + w > piano_rect.left() && x < piano_rect.right() && y + h > piano_rect.top() && y < piano_rect.bottom() {
                     let note_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
                     
-                    let color = if note.selected {
-                        crate::ui::theme::THEME.accent_primary
+                    let base_color = if note.selected {
+                        theme.note_selected_color
                     } else {
-                        crate::ui::theme::THEME.note_bg
+                        theme.note_color
                     };
                     
-                    painter.rect(
-                        note_rect,
-                        2.0,
-                        color,
-                        egui::Stroke::new(1.0, egui::Color32::WHITE),
-                        egui::StrokeKind::Middle
+                    // Main note body with rounded corners
+                    painter.rect_filled(note_rect, 3.0, base_color);
+                    
+                    // Darker header/top edge for depth
+                    let header_height = (h * 0.25).min(6.0);
+                    let header_rect = egui::Rect::from_min_size(
+                        note_rect.min, 
+                        egui::vec2(w, header_height)
                     );
+                    painter.rect_filled(header_rect, egui::CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, base_color.gamma_multiply(0.7));
+                    
+                    // Border
+                    painter.rect_stroke(
+                        note_rect,
+                        3.0,
+                        egui::Stroke::new(1.0, if note.selected { egui::Color32::WHITE } else { base_color.gamma_multiply(1.3) }),
+                        egui::StrokeKind::Inside
+                    );
+                    
+                    // Note name label (only if wide enough)
+                    if w > 25.0 && h > 12.0 {
+                        let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+                        let note_name = note_names[(note.key % 12) as usize];
+                        let octave = (note.key as i32 / 12) - 1;
+                        painter.text(
+                            egui::pos2(x + 3.0, y + h / 2.0),
+                            egui::Align2::LEFT_CENTER,
+                            format!("{}{}", note_name, octave),
+                            egui::FontId::proportional(9.0),
+                            egui::Color32::from_rgb(30, 30, 35)
+                        );
+                    }
 
                     // Interaction
                     
-                    // Eraser
-                    if ui.rect_contains_pointer(note_rect) && ui.input(|i| i.pointer.secondary_down()) {
+                    // Eraser: delete on right-click OR left-click when Eraser tool is active
+                    let is_erasing = ui.rect_contains_pointer(note_rect) && (
+                        ui.input(|i| i.pointer.secondary_down()) ||
+                        (state.current_tool == PianoRollTool::Eraser && ui.input(|i| i.pointer.primary_clicked()))
+                    );
+                    if is_erasing {
                         note_actions.push((NoteAction::Delete, idx, note.clone()));
                         note_interacted_this_frame = true;
                         continue; 
@@ -715,6 +899,14 @@ pub fn show_piano_roll(
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                         }
                         if body_response.dragged() || body_response.clicked() || (body_response.hovered() && ui.input(|i| i.pointer.primary_down())) { note_interacted_this_frame = true; }
+                        
+                        // Context Menu (right-click)
+                        body_response.context_menu(|ui| {
+                            if ui.button("Delete Note").clicked() {
+                                note_actions.push((NoteAction::Delete, idx, note.clone()));
+                                ui.close();
+                            }
+                        });
                         
                         if body_response.clicked() {
                             if ui.input(|i| i.modifiers.ctrl) {
@@ -858,63 +1050,77 @@ pub fn show_piano_roll(
         }
 
         // 6. Interaction: Add Note (Background Click)
-        if !note_interacted_this_frame {
+        // Only in Pencil or Select mode (not Eraser)
+        if !note_interacted_this_frame && state.current_tool != PianoRollTool::Eraser {
             let pointer_pos = ui.input(|i| i.pointer.interact_pos());
             if let Some(pos) = pointer_pos {
-                if piano_rect.contains(pos) {
-                        let local_x = pos.x - piano_rect.left() + state.scroll_x;
-                        let local_y = pos.y - piano_rect.top() + state.scroll_y;
-                        
-                        let start_exact = local_x as f64 / beat_width as f64;
-                        let snap = if ui.input(|i| i.modifiers.shift) { None } else { state.snap_grid.value() };
-                        let start = snap_to_grid(start_exact, snap);
-                        
-                        let row_idx = (local_y / note_height).floor();
-                        let key = (127.0 - row_idx).clamp(0.0, 127.0) as u8;
-                        
-                        let is_valid = if let Some(notes) = valid_notes {
-                            notes.contains(&(key as i16))
-                        } else { true };
+                // Define the note area (after keyboard)
+                let note_area = egui::Rect::from_min_size(
+                    egui::pos2(piano_rect.left() + keyboard_width, piano_rect.top()),
+                    egui::vec2(piano_rect.width() - keyboard_width, piano_rect.height())
+                );
+                
+                if note_area.contains(pos) {
+                    let local_x = pos.x - note_area.left() + state.scroll_x;
+                    let local_y = pos.y - piano_rect.top() + state.scroll_y;
+                    
+                    let start_exact = local_x as f64 / beat_width as f64;
+                    let snap = if ui.input(|i| i.modifiers.shift) { None } else { state.snap_grid.value() };
+                    let start = snap_to_grid(start_exact, snap);
+                    
+                    let row_idx = (local_y / note_height).floor();
+                    let key = (127.0 - row_idx).clamp(0.0, 127.0) as u8;
+                    
+                    let is_valid = if let Some(notes) = valid_notes {
+                        notes.contains(&(key as i16))
+                    } else { true };
 
-                        if is_valid {
-                            // Find existing?
-                            let exists = clip.notes.iter().any(|n| n.key == key && n.start <= start_exact && n.start + n.duration >= start_exact);
-                            
-                            // Only add if not existing and clicked
-                            if !exists && ui.input(|i| i.pointer.primary_clicked()) {
-                                // Deselect others first
-                                if !ui.input(|i| i.modifiers.shift) && !ui.input(|i| i.modifiers.ctrl) {
-                                    for note in clip.notes.iter_mut() {
-                                        note.selected = false;
-                                    }
+                    if is_valid {
+                        // Find existing note at this position?
+                        let exists = clip.notes.iter().any(|n| n.key == key && n.start <= start_exact && n.start + n.duration >= start_exact);
+                        
+                        // Pencil: continuous paint (primary_down), Select: add on click
+                        let should_add = match state.current_tool {
+                            PianoRollTool::Pencil => ui.input(|i| i.pointer.primary_down()),
+                            PianoRollTool::Select => ui.input(|i| i.pointer.primary_clicked()),
+                            PianoRollTool::Eraser => false,
+                        };
+                        
+                        if !exists && should_add {
+                            // Deselect others first (unless modifier)
+                            if !ui.input(|i| i.modifiers.shift) && !ui.input(|i| i.modifiers.ctrl) {
+                                for note in clip.notes.iter_mut() {
+                                    note.selected = false;
                                 }
-
-                                let new_note = omni_shared::project::Note {
-                                    start,
-                                    duration: state.last_note_length,
-                                    key,
-                                    velocity: DEFAULT_VELOCITY,
-                                    selected: true,
-                                    probability: 1.0,
-                                    velocity_deviation: 0,
-                                    condition: omni_shared::project::NoteCondition::Always,
-                                };
-                                clip.notes.push(new_note.clone());
-                                
-                                send_toggle_note(sender, track_idx, clip_idx, &new_note);
                             }
+
+                            let new_note = omni_shared::project::Note {
+                                start,
+                                duration: state.last_note_length,
+                                key,
+                                velocity: DEFAULT_VELOCITY,
+                                selected: true,
+                                probability: 1.0,
+                                velocity_deviation: 0,
+                                condition: omni_shared::project::NoteCondition::Always,
+                            };
+                            clip.notes.push(new_note.clone());
+                            
+                            send_toggle_note(sender, track_idx, clip_idx, &new_note);
                         }
                     }
+                }
             }
         }
         
         // ================================================================
-        // MARQUEE SELECTION
+        // MARQUEE SELECTION (Only in Select mode)
         // ================================================================
         let primary_down = ui.input(|i| i.pointer.primary_down());
         let primary_released = ui.input(|i| i.pointer.primary_released());
         
-        if !note_interacted_this_frame && piano_rect.contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or_default()) {
+        // Only allow marquee in Select mode
+        if state.current_tool == PianoRollTool::Select && !note_interacted_this_frame && piano_rect.contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or_default()) {
             if primary_down && state.marquee_start.is_none() {
                 // Start marquee
                 if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
@@ -932,7 +1138,7 @@ pub fn show_piano_roll(
                 painter.rect_stroke(
                     marquee_rect,
                     0.0,
-                    egui::Stroke::new(1.0, crate::ui::theme::THEME.accent_secondary),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
                     egui::StrokeKind::Middle
                 );
                 painter.rect_filled(
@@ -980,21 +1186,25 @@ pub fn show_piano_roll(
         // 7. Draw Playhead
         if is_playing {
             let current_beat_global = global_sample_pos as f64 / samples_per_beat as f64;
-            // Draw Playhead relative to scroll
-            let playhead_beat = current_beat_global; // Using global beat for now, could be relative to clip logic in future
+            let loop_beat = current_beat_global % clip.length;
             
-            // If piano roll is showing "Clip Content", we might want to mod it by length if looping?
-            // For now, let's just draw the raw position. 
-            // Better: loop it by clip length to visualize "where we are in the clip"
-            let loop_beat = playhead_beat % clip.length;
+            let playhead_x = grid_left + (loop_beat as f32 * beat_width) - state.scroll_x;
             
-            let playhead_x = piano_rect.left() + (loop_beat as f32 * beat_width) - state.scroll_x;
-            
-            if playhead_x >= piano_rect.left() && playhead_x <= piano_rect.right() {
+            if playhead_x >= grid_left && playhead_x <= piano_rect.right() {
+                // Playhead line
                 painter.line_segment(
                     [egui::pos2(playhead_x, piano_rect.top()), egui::pos2(playhead_x, piano_rect.bottom())],
-                    (2.0, egui::Color32::RED)
+                    (2.0, theme.playhead_color)
                 );
+                
+                // Triangle flag at the top
+                let flag_size = 8.0;
+                let flag_points = vec![
+                    egui::pos2(playhead_x, piano_rect.top()),
+                    egui::pos2(playhead_x + flag_size, piano_rect.top()),
+                    egui::pos2(playhead_x, piano_rect.top() + flag_size),
+                ];
+                painter.add(egui::Shape::convex_polygon(flag_points, theme.playhead_color, egui::Stroke::NONE));
             }
         }
         
