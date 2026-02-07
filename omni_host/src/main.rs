@@ -381,8 +381,30 @@ impl eframe::App for OmniApp {
             ui.horizontal(|ui| {
                 ui.set_height(crate::ui::theme::PANEL_TOP_HEIGHT);
                 
-                let play_icon = if self.is_playing { "■" } else { "▶" };
-                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new(play_icon)).clicked() {
+                let (play_rect, play_resp) = ui.allocate_exact_size(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Sense::click());
+                if play_resp.hovered() {
+                    ui.painter().rect_filled(play_rect, 2.0, crate::ui::theme::THEME.bg_light);
+                }
+                
+                let icon_color = if self.is_playing { crate::ui::theme::THEME.accent_primary } else { crate::ui::theme::THEME.text_secondary };
+                let center = play_rect.center();
+                
+                if self.is_playing {
+                    // Stop Square
+                    let size = 10.0;
+                    ui.painter().rect_filled(egui::Rect::from_center_size(center, egui::vec2(size, size)), 1.0, icon_color);
+                } else {
+                    // Play Triangle
+                    let size = 10.0;
+                    let points = vec![
+                        center + egui::vec2(-size * 0.4, -size * 0.5),
+                        center + egui::vec2(-size * 0.4, size * 0.5),
+                        center + egui::vec2(size * 0.6, 0.0),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(points, icon_color, egui::Stroke::NONE));
+                }
+
+                if play_resp.clicked() {
                     self.is_playing = !self.is_playing;
                     if self.is_playing {
                         let _ = self.messenger.send(EngineCommand::Play);
@@ -507,9 +529,36 @@ impl eframe::App for OmniApp {
                 
                 ui.separator();
 
-                let view_btn_icon = if self.show_arrangement_view { "|||" } else { "☰" };
-                let hover_text = if self.show_arrangement_view { "Switch to Session View" } else { "Switch to Arrangement View" };
-                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new(view_btn_icon)).on_hover_text(hover_text).clicked() {
+                let (view_rect, view_resp) = ui.allocate_exact_size(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Sense::click());
+                if view_resp.hovered() {
+                    ui.painter().rect_filled(view_rect, 2.0, crate::ui::theme::THEME.bg_light);
+                }
+                let view_icon_color = crate::ui::theme::THEME.text_secondary;
+                let center = view_rect.center();
+                
+                if self.show_arrangement_view {
+                    // Draw Session Icon (Vertical Bars |||)
+                    let v_bar_w = 2.0;
+                    let v_bar_h = 14.0;
+                    let v_spacing = 5.0;
+                    ui.painter().rect_filled(egui::Rect::from_center_size(center + egui::vec2(-v_spacing, 0.0), egui::vec2(v_bar_w, v_bar_h)), 1.0, view_icon_color);
+                    ui.painter().rect_filled(egui::Rect::from_center_size(center, egui::vec2(v_bar_w, v_bar_h)), 1.0, view_icon_color);
+                    ui.painter().rect_filled(egui::Rect::from_center_size(center + egui::vec2(v_spacing, 0.0), egui::vec2(v_bar_w, v_bar_h)), 1.0, view_icon_color);
+                    
+                    view_resp.clone().on_hover_text("Switch to Session View");
+                } else {
+                    // Draw Arrangement Icon (Horizontal Bars ☰)
+                    let h_bar_w = 14.0;
+                    let h_bar_h = 2.0;
+                    let h_spacing = 5.0;
+                    ui.painter().rect_filled(egui::Rect::from_center_size(center + egui::vec2(0.0, -h_spacing), egui::vec2(h_bar_w, h_bar_h)), 1.0, view_icon_color);
+                    ui.painter().rect_filled(egui::Rect::from_center_size(center, egui::vec2(h_bar_w, h_bar_h)), 1.0, view_icon_color);
+                    ui.painter().rect_filled(egui::Rect::from_center_size(center + egui::vec2(0.0, h_spacing), egui::vec2(h_bar_w, h_bar_h)), 1.0, view_icon_color);
+                    
+                    view_resp.clone().on_hover_text("Switch to Arrangement View");
+                }
+
+                if view_resp.clicked() {
                     self.show_arrangement_view = !self.show_arrangement_view;
                 }
             });
