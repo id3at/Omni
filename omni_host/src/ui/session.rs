@@ -173,6 +173,38 @@ pub fn show_matrix(
                 ui.separator();
                 ui.add_space(4.0);
             }
+            
+            // ADD TRACK COLUMN
+            ui.vertical(|ui| {
+                ui.set_width(theme::TRACK_WIDTH);
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(theme::TRACK_WIDTH, theme::HEADER_HEIGHT), egui::Sense::click());
+                
+                let bg_color = if resp.hovered() { theme::THEME.bg_light } else { theme::THEME.bg_medium };
+                ui.painter().rect_filled(rect, 2.0, bg_color);
+                
+                // Plus Icon
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "+",
+                    egui::FontId::proportional(24.0), 
+                    theme::THEME.accent_primary,
+                );
+                
+                if resp.clicked() {
+                    let node = Box::new(omni_engine::nodes::GainNode::new(1.0));
+                    let _ = sender.send(EngineCommand::AddTrackNode { 
+                        node, 
+                        name: format!("Track {}", tracks.len() + 1),
+                        plugin_path: None 
+                    });
+                     
+                    tracks.push(TrackData {
+                        name: format!("Track {}", tracks.len() + 1),
+                        ..Default::default()
+                    });
+                }
+            });
         }); 
     });
 }

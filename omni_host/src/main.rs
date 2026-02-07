@@ -585,20 +585,7 @@ impl eframe::App for OmniApp {
                      &mut self.pending_note_names_rx,
                  );
                  
-                 // Add Track Button in Session View
-                 if ui.button("+ Add Track").clicked() {
-                     let node = Box::new(omni_engine::nodes::GainNode::new(1.0));
-                     let _ = self.messenger.send(EngineCommand::AddTrackNode { 
-                         node, 
-                         name: format!("Track {}", self.tracks.len() + 1),
-                         plugin_path: None 
-                     });
-                     
-                     self.tracks.push(TrackData {
-                         name: format!("Track {}", self.tracks.len() + 1),
-                         ..Default::default()
-                     });
-                 }
+
                  
              } else {
                  // ARRANGEMENT VIEW

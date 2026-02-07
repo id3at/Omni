@@ -84,7 +84,7 @@ pub struct ClapPlugin {
     audio_buffers: Mutex<AudioBuffers>,
     
     // Sample Rate for process
-    pub sample_rate: f64,
+    pub _sample_rate: f64,
 }
 
 unsafe impl Send for ClapPlugin {}
@@ -352,7 +352,7 @@ impl ClapPlugin {
                 expression_events: Vec::with_capacity(128),
                 param_events: Vec::with_capacity(32),
             }),
-            sample_rate,
+            _sample_rate: sample_rate,
         })
     }
 
