@@ -142,8 +142,14 @@ pub fn show(
                 bar_painter.rect_filled(bar_rect, 2.0, color);
                 
                 // Check interaction using pointer position (no allocate_rect!)
+                // Use FULL HEIGHT for hit testing so we can grab small values easily
+                let hit_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, rect.top()),
+                    egui::vec2(w - 1.0, rect.height())
+                );
+                
                 let bar_hovered = ui.input(|i| {
-                    i.pointer.hover_pos().map(|p| bar_rect.expand(2.0).contains(p)).unwrap_or(false)
+                    i.pointer.hover_pos().map(|p| hit_rect.contains(p)).unwrap_or(false)
                 });
                 
                 if bar_hovered && lane_response.drag_started() {

@@ -1119,8 +1119,8 @@ pub fn show_piano_roll(
         let primary_down = ui.input(|i| i.pointer.primary_down());
         let primary_released = ui.input(|i| i.pointer.primary_released());
         
-        // Only allow marquee in Select mode
-        if state.current_tool == PianoRollTool::Select && !note_interacted_this_frame && piano_rect.contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or_default()) {
+        // Only allow marquee in Select mode AND if not dragging loop marker
+        if state.current_tool == PianoRollTool::Select && !note_interacted_this_frame && state.loop_drag_original.is_none() && piano_rect.contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or_default()) {
             if primary_down && state.marquee_start.is_none() {
                 // Start marquee
                 if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
