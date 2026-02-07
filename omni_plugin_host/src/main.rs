@@ -145,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     p.process_audio(slice, &[], &[], &[], header, &transport);
                                     
                                     // Update Latency
-                                    let latency = unsafe { p.get_latency() };
+                                    let latency = p.get_latency();
                                     std::ptr::write_volatile(&mut header.latency, latency);
                                 } else {
                                      // Silence or passthrough (here we assume silence if no plugin)
@@ -173,7 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     p.process_audio(slice, &events, &[], &[], header, &transport);
                                     
                                     // Update Latency
-                                    let latency = unsafe { p.get_latency() };
+                                    let latency = p.get_latency();
                                     std::ptr::write_volatile(&mut header.latency, latency);
                                 }
                             }
