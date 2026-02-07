@@ -96,7 +96,7 @@ pub struct PianoRollState {
     pub scroll_y: f32,
     pub zoom_x: f32,
     pub zoom_y: f32,
-    pub drag_original_note: Option<omni_shared::project::Note>,
+    pub drag_original_notes: Option<Vec<(usize, omni_shared::project::Note)>>,
     pub drag_accumulated_delta: egui::Vec2,
     pub last_note_length: f64,
     // Loop marker drag state
@@ -123,7 +123,7 @@ impl Default for PianoRollState {
             scroll_y: DEFAULT_SCROLL_Y,
             zoom_x: DEFAULT_ZOOM_X,
             zoom_y: DEFAULT_ZOOM_Y,
-            drag_original_note: None,
+            drag_original_notes: None,
             drag_accumulated_delta: egui::Vec2::ZERO,
             last_note_length: DEFAULT_NOTE_LENGTH,
             loop_drag_original: None,
@@ -618,6 +618,13 @@ pub fn show_piano_roll(
         // 5. Draw Notes & Handle Interactions
         let mut note_actions: Vec<(NoteAction, usize, omni_shared::project::Note)> = Vec::new();
         
+        // Drag state tracking for this frame
+        let mut drag_started = false;
+        let mut drag_delta = egui::Vec2::ZERO;
+        let mut drag_stopped = false;
+        let mut is_resizing = false;
+
+        // Use a loop index since we might modify collection if we deleted, but we only record actions here
         for (idx, note) in clip.notes.iter_mut().enumerate() {
             let x = piano_rect.left() + (note.start as f32 * beat_width) - state.scroll_x;
             let y = piano_rect.top() + ((127 - note.key) as f32 * note_height) - state.scroll_y;
@@ -667,31 +674,38 @@ pub fn show_piano_roll(
                     if resize_response.dragged() || resize_response.clicked() || (resize_response.hovered() && ui.input(|i| i.pointer.primary_down())) { note_interacted_this_frame = true; }
                     
                     if resize_response.drag_started() {
-                        state.drag_original_note = Some(note.clone());
-                        state.drag_accumulated_delta = egui::Vec2::ZERO;
+                        // For resizing, we usually resize just ONE note unless we implement multi-resize later.
+                        // For now, let's keep it simple: if you drag resize handle, you resize THIS note.
+                        // If it's selected, maybe we resize ALL selected? Let's stick to single for validation first, 
+                        // OR follow the plan which implies multi-edit. 
+                        // The user request was "dragging notes", usually implies moving.
+                        // Let's implement multi-resize if they are selected too, for consistency.
+                        
+                        // If this note is not selected, select it exclusively
+                        if !note.selected {
+                             // Deselect others? Or just let it be. 
+                             // If I resize an unselected note, usually it selects it and deselects others.
+                             // But let's keep it simple.
+                        }
+                        
+                        drag_started = true;
+                        is_resizing = true;
                         state.pending_undo = true;
+                        // For resize, we treat the interacted note as the "leader" if it wasn't selected
+                        if !note.selected {
+                            note.selected = true;
+                            note_actions.push((NoteAction::SelectExclusive, idx, note.clone()));
+                        }
                     }
                     
                     if resize_response.dragged() && !state.pending_undo {
-                        state.drag_accumulated_delta += resize_response.drag_delta();
-                        if let Some(orig) = &state.drag_original_note {
-                            let delta_beats = state.drag_accumulated_delta.x / beat_width;
-                            let raw_duration = (orig.duration + delta_beats as f64).max(MIN_NOTE_DURATION);
-                            
-                            // Snap only if Shift not held
-                            let snap = if ui.input(|i| i.modifiers.shift) { None } else { state.snap_grid.value() };
-                            note.duration = snap_to_grid(raw_duration, snap).max(MIN_NOTE_DURATION);
-                        }
+                        drag_delta += resize_response.drag_delta();
+                        is_resizing = true;
                     }
                     
                     if resize_response.drag_stopped() {
-                        if let Some(orig) = &state.drag_original_note {
-                            // Toggle off old (Remove), toggle on new (Add)
-                            send_remove_note(sender, track_idx, clip_idx, orig);
-                            send_toggle_note(sender, track_idx, clip_idx, note);
-                            state.last_note_length = note.duration; 
-                        }
-                        state.drag_original_note = None;
+                        drag_stopped = true;
+                        is_resizing = true;
                     }
 
                     // Check Move Body
@@ -715,49 +729,109 @@ pub fn show_piano_roll(
                                 note.selected = true;
                                 note_actions.push((NoteAction::SelectExclusive, idx, note.clone()));
                             }
-                            state.drag_original_note = Some(note.clone());
-                            state.drag_accumulated_delta = egui::Vec2::ZERO;
+                            drag_started = true;
+                            is_resizing = false;
                             state.pending_undo = true;
                         }
                         
                         if body_response.dragged() && !state.pending_undo {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                            state.drag_accumulated_delta += body_response.drag_delta();
-                            
-                            if let Some(orig) = &state.drag_original_note {
-                                let delta_beats = state.drag_accumulated_delta.x / beat_width;
-                                let delta_keys = -(state.drag_accumulated_delta.y / note_height); // Y inverted
-                                
-                                note.start = (orig.start + delta_beats as f64).max(0.0);
-                                
-                                // Snap Beat (unless Shift held)
-                                let snap = if ui.input(|i| i.modifiers.shift) { None } else { state.snap_grid.value() };
-                                note.start = snap_to_grid(note.start, snap);
-                                
-                                // Snap Key (Integral)
-                                let new_key = (orig.key as f32 + delta_keys).clamp(0.0, 127.0) as u8;
-                                if new_key != note.key {
-                                    let is_valid = if let Some(notes) = valid_notes {
-                                        notes.contains(&(new_key as i16))
-                                    } else { true };
-                                    
-                                    if is_valid {
-                                        note.key = new_key;
-                                    }
-                                }
-                            }
+                            drag_delta += body_response.drag_delta();
                         }
                         
                         if body_response.drag_stopped() {
-                            if let Some(orig) = &state.drag_original_note {
-                                // Toggle off old (Remove), toggle on new (Add)
-                                send_remove_note(sender, track_idx, clip_idx, orig);
-                                send_toggle_note(sender, track_idx, clip_idx, note);
-                            }
-                            state.drag_original_note = None;
+                            drag_stopped = true;
                         }
                     }
             }
+        }
+
+        // --- Handle Drag Logic (Post-Loop) ---
+
+        // 1. Drag Start: Capture all selected notes
+        if drag_started {
+            // Apply any selection changes from this frame first (e.g. click-select on drag start)
+           if !note_actions.is_empty() {
+                // Apply exclusively selection if needed so the capture picks up the right notes
+                 for (action, idx, _) in &note_actions {
+                    if let NoteAction::SelectExclusive = action {
+                         // Exclusive select: deselect others
+                        for (other_idx, other_note) in clip.notes.iter_mut().enumerate() {
+                            other_note.selected = other_idx == *idx;
+                        }
+                    }
+                }
+           }
+
+            let selected_notes: Vec<(usize, omni_shared::project::Note)> = clip.notes.iter()
+                .enumerate()
+                .filter(|(_, n)| n.selected)
+                .map(|(i, n)| (i, n.clone()))
+                .collect();
+            
+            if !selected_notes.is_empty() {
+                state.drag_original_notes = Some(selected_notes);
+                state.drag_accumulated_delta = egui::Vec2::ZERO;
+            }
+        }
+
+        // 2. Drag Update: Apply delta to all captured notes
+        if drag_delta != egui::Vec2::ZERO {
+            state.drag_accumulated_delta += drag_delta;
+            
+            if let Some(originals) = &state.drag_original_notes {
+                let delta_beats = state.drag_accumulated_delta.x / beat_width;
+                let delta_keys = -(state.drag_accumulated_delta.y / note_height); // Y inverted
+
+                let snap = if ui.input(|i| i.modifiers.shift) { None } else { state.snap_grid.value() };
+
+                for (idx, orig_note) in originals {
+                    if *idx < clip.notes.len() { // Safety check
+                        let note = &mut clip.notes[*idx];
+                        
+                        if is_resizing {
+                            // Resize logic
+                             let raw_duration = (orig_note.duration + delta_beats as f64).max(MIN_NOTE_DURATION);
+                             note.duration = snap_to_grid(raw_duration, snap).max(MIN_NOTE_DURATION);
+                        } else {
+                            // Move logic
+                            let raw_start = (orig_note.start + delta_beats as f64).max(0.0);
+                             note.start = snap_to_grid(raw_start, snap);
+
+                             let new_key = (orig_note.key as f32 + delta_keys).clamp(0.0, 127.0) as u8;
+                             // Verify validity
+                              let is_valid = match valid_notes {
+                                None => true,
+                                Some(keys) => keys.contains(&(new_key as i16)),
+                            };
+                            if is_valid {
+                                note.key = new_key;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Drag Stop: Finalize and send updates
+        if drag_stopped {
+            if let Some(originals) = &state.drag_original_notes {
+                 for (idx, orig_note) in originals {
+                    // Update engine: Remove old, Add new
+                     if *idx < clip.notes.len() {
+                        let note = &clip.notes[*idx];
+                        // Optimize: Only send if changed? The engine might handle it, but allow force update
+                        // We use remove/toggle to be safe.
+                         send_remove_note(sender, track_idx, clip_idx, orig_note);
+                         send_toggle_note(sender, track_idx, clip_idx, note);
+                         
+                         if is_resizing {
+                             state.last_note_length = note.duration;
+                         }
+                     }
+                 }
+            }
+            state.drag_original_notes = None;
         }
         
         // Handle deferred undo capture
