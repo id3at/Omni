@@ -140,6 +140,9 @@ pub fn show_piano_roll(
         // Clip Canvas
         let painter = painter.with_clip_rect(piano_rect);
         
+        // Draw Background
+        painter.rect_filled(piano_rect, 0.0, crate::ui::theme::THEME.bg_dark);
+        
         // 3. Draw Background (Time Grid)
         let beat_width = state.zoom_x;
         let start_beat = (state.scroll_x / beat_width).max(0.0);
@@ -149,7 +152,7 @@ pub fn show_piano_roll(
         for b in (start_beat as usize)..(end_beat as usize + 1) {
             let x = piano_rect.left() + (b as f32 * beat_width) - state.scroll_x;
             if x >= piano_rect.left() && x <= piano_rect.right() {
-                let color = if b % 4 == 0 { egui::Color32::from_gray(80) } else { egui::Color32::from_gray(40) };
+                let color = if b % 4 == 0 { crate::ui::theme::THEME.grid_line } else { crate::ui::theme::THEME.grid_line.gamma_multiply(0.5) };
                 painter.line_segment([egui::pos2(x, piano_rect.top()), egui::pos2(x, piano_rect.bottom())], (1.0, color));
             }
         }
@@ -212,7 +215,7 @@ pub fn show_piano_roll(
             // Loop Line
             painter.line_segment(
                 [egui::pos2(draw_loop_x, piano_rect.top()), egui::pos2(draw_loop_x, piano_rect.bottom())],
-                (2.0, egui::Color32::YELLOW)
+                (2.0, crate::ui::theme::THEME.accent_secondary)
             );
             
             // Label
@@ -243,11 +246,11 @@ pub fn show_piano_roll(
                     
                     let bg_color = if !is_valid_note {
                         // Invalid notes: dim red tint
-                        egui::Color32::from_rgba_premultiplied(50, 15, 15, 180)
+                        crate::ui::theme::THEME.piano_key_black.gamma_multiply(0.5).linear_multiply(0.5) // Approximate invalid
                     } else if is_black {
-                        egui::Color32::from_rgba_premultiplied(30, 30, 30, 100)
+                        crate::ui::theme::THEME.piano_key_black
                     } else {
-                        egui::Color32::TRANSPARENT
+                        crate::ui::theme::THEME.piano_key_white.gamma_multiply(0.1) // Slight tint for white keys if needed, or transparent
                     };
                     
                     if bg_color != egui::Color32::TRANSPARENT {
@@ -258,7 +261,7 @@ pub fn show_piano_roll(
                         );
                     }
                     
-                    painter.line_segment([egui::pos2(piano_rect.left(), y), egui::pos2(piano_rect.right(), y)], (1.0, egui::Color32::from_gray(30)));
+                    painter.line_segment([egui::pos2(piano_rect.left(), y), egui::pos2(piano_rect.right(), y)], (1.0, crate::ui::theme::THEME.grid_line));
                     
                     // Label C notes
                     if note % 12 == 0 {
@@ -289,9 +292,9 @@ pub fn show_piano_roll(
                     let note_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
                     
                     let color = if note.selected {
-                        egui::Color32::from_rgb(150, 255, 150)
+                        crate::ui::theme::THEME.accent_primary
                     } else {
-                        egui::Color32::from_rgb(100, 200, 255)
+                        crate::ui::theme::THEME.note_bg
                     };
                     
                     painter.rect(

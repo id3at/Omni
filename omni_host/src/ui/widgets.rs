@@ -13,13 +13,13 @@ pub fn knob_ui(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusi
         response.mark_changed();
     }
 
-    if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact_selectable(&response, true);
-        let center = rect.center();
+        if ui.is_rect_visible(rect) {
+            // let visuals = ui.style().interact_selectable(&response, true); // No longer needed
+            let center = rect.center();
         let radius = rect.width() / 2.0;
 
         // Draw Background Arc
-        ui.painter().circle(center, radius, visuals.bg_fill, visuals.bg_stroke);
+        ui.painter().circle(center, radius, crate::ui::theme::THEME.knob_base, egui::Stroke::new(1.0, crate::ui::theme::THEME.border));
 
         // Draw Active Arc
         let start_angle = -135.0f32.to_radians();
@@ -31,7 +31,7 @@ pub fn knob_ui(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusi
         let indicator_len = radius * 0.8;
         let indicator_pos = center + egui::Vec2::new(current_angle.sin(), -current_angle.cos()) * indicator_len;
         
-        ui.painter().line_segment([center, indicator_pos], (2.0, visuals.fg_stroke.color));
+        ui.painter().line_segment([center, indicator_pos], (2.0, crate::ui::theme::THEME.knob_arc));
     }
     
     response

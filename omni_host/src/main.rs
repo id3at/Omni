@@ -376,8 +376,11 @@ impl eframe::App for OmniApp {
             &self.messenger
         );
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // 1. TOP PANEL: Transport & Global Controls
+        egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.set_height(30.0);
+                
                 if ui.button(if self.is_playing { "STOP" } else { "PLAY" }).clicked() {
                     self.is_playing = !self.is_playing;
                     if self.is_playing {
@@ -387,9 +390,8 @@ impl eframe::App for OmniApp {
                     }
                 }
                 
-                 if ui.add(egui::Button::new(if self.is_recording { "REC [ON]" } else { "REC [OFF]" })
-                     .fill(if self.is_recording { egui::Color32::RED } else { egui::Color32::from_gray(50) }))
-                     .clicked() {
+                let rec_color = if self.is_recording { crate::ui::theme::THEME.accent_warn } else { egui::Color32::from_gray(50) };
+                if ui.add(egui::Button::new(if self.is_recording { "REC [ON]" } else { "REC [OFF]" }).fill(rec_color)).clicked() {
                     self.is_recording = !self.is_recording;
                     if self.is_recording {
                         let _ = self.messenger.send(EngineCommand::StartRecording);
@@ -410,7 +412,35 @@ impl eframe::App for OmniApp {
                     }
                 }
                 
-                if ui.button("Save Project").clicked() {
+                ui.separator();
+                
+                // BPM & Volume
+                ui.label("BPM:");
+                if ui.add(egui::DragValue::new(&mut self.bpm).range(40.0..=240.0).speed(1.0)).changed() {
+                    let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
+                }
+                
+                ui.add_space(10.0);
+                ui.label("Vol:");
+                if ui::widgets::knob_ui(ui, &mut self.master_volume, 0.0..=1.0).changed() {
+                    let _ = self.messenger.send(EngineCommand::SetVolume(self.master_volume));
+                }
+
+                ui.separator();
+
+                // Project Controls
+                if ui.button("New").clicked() {
+                     let _ = self.messenger.send(EngineCommand::NewProject);
+                     self.tracks.clear();
+                     self.tracks.push(TrackData::default()); // Start with one track
+                     self.selected_track = 0;
+                     self.last_selected_track = 9999;
+                     self.selected_clip = 0;
+                     self.bpm = 120.0;
+                     let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
+                }
+                
+                if ui.button("Save").clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Omni Project", &["omni"]).save_file() {
                         let path_str = path.to_string_lossy().to_string();
                         
@@ -460,81 +490,87 @@ impl eframe::App for OmniApp {
                     }
                 }
 
-                if ui.button("Load Project").clicked() {
+                if ui.button("Load").clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Omni Project", &["omni"]).pick_file() {
                         self.load_project(path.to_string_lossy().to_string());
                     }
                 }
-
-                if ui.button("New Project").clicked() {
-                     let _ = self.messenger.send(EngineCommand::NewProject);
-                     self.tracks.clear();
-                     self.tracks.push(TrackData::default()); // Start with one track
-                     self.selected_track = 0;
-                     self.last_selected_track = 9999;
-                     self.selected_clip = 0;
-                     self.bpm = 120.0;
-                     let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
-                }
                 
+                ui.separator();
+
                 let view_btn_text = if self.show_arrangement_view { "Session View" } else { "Arrangement View" };
                 if ui.button(view_btn_text).clicked() {
                     self.show_arrangement_view = !self.show_arrangement_view;
                 }
-
-                ui.add_space(20.0);
-                ui.label("Master Vol:");
-                if ui::widgets::knob_ui(ui, &mut self.master_volume, 0.0..=1.0).changed() {
-                    let _ = self.messenger.send(EngineCommand::SetVolume(self.master_volume));
-                }
-                
-                ui.add_space(10.0);
-                ui.label("BPM:");
-                if ui.add(egui::DragValue::new(&mut self.bpm).range(40.0..=240.0).speed(1.0)).changed() {
-                    let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
-                }
-                
-                ui.add_space(20.0);
-                if ui.button("+ Add Track").clicked() {
-                                        // Use generic add track command which engine handles (likely empty track)
-                    // If no specific command exists, create default node?
-                    // EngineCommand says AddTrackNode
-                    // Let's use AddTrackNode with GainNode
-                    let node = Box::new(omni_engine::nodes::GainNode::new(1.0));
-                    let _ = self.messenger.send(EngineCommand::AddTrackNode { 
-                        node, 
-                        name: format!("Track {}", self.tracks.len() + 1),
-                        plugin_path: None 
-                    });
-                    
-                    self.tracks.push(TrackData {
-                        name: format!("Track {}", self.tracks.len() + 1),
-                        ..Default::default()
-                    });
-                }
             });
-            ui.separator();
+        });
 
+        // 2. BOTTOM PANEL: Details (Piano Roll / Devices) - RESIZABLE
+        if !self.show_arrangement_view {
+            egui::TopBottomPanel::bottom("detail_view")
+                .resizable(true)
+                .default_height(300.0)
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                         // DEVICE VIEW (Top half of bottom panel?)
+                         // Or just stack them.
+                         
+                         if self.selected_track < self.tracks.len() {
+                            let track = &mut self.tracks[self.selected_track];
+                            
+                            ui.collapsing("Device Parameters", |ui| {
+                                ui::device::show_device_view(
+                                    ui, 
+                                    &self.plugin_params, 
+                                    &mut track.parameters, 
+                                    &self.messenger, 
+                                    self.selected_track
+                                );
+                            });
+                         }
+                         
+                         ui.separator();
+
+                         // PIANO ROLL
+                         let track_len = self.tracks.len();
+                         if self.selected_track < track_len {
+                             let track = &mut self.tracks[self.selected_track];
+                             let clip_len = track.clips.len();
+                             if self.selected_clip < clip_len {
+                                 let clip = &mut track.clips[self.selected_clip];
+                                 
+                                 ui::piano_roll::show_piano_roll(
+                                     ui,
+                                     clip,
+                                     &mut self.piano_roll_state,
+                                     &self.messenger,
+                                     self.selected_track,
+                                     self.selected_clip,
+                                     &track.name,
+                                     track.valid_notes.as_ref(),
+                                     self.is_playing,
+                                     self.global_sample_pos,
+                                     self.bpm,
+                                     if let Some(ref e) = self.engine { e.get_sample_rate() as f32 } else { 44100.0 },
+                                     &mut self.selected_sequencer_lane,
+                                     newly_touched_param,
+                                     &self.plugin_params,
+                                     &mut self.is_learning,
+                                 );
+                             } else {
+                                 ui.centered_and_justified(|ui| ui.label("No Clip Selected"));
+                             }
+                         } else {
+                             ui.centered_and_justified(|ui| ui.label("No Track Selected"));
+                         }
+                    });
+                });
+        }
+
+        // 3. CENTRAL PANEL: Session / Arrangement (Fills rest)
+        egui::CentralPanel::default().show(ctx, |ui| {
              if !self.show_arrangement_view {
-                 // DEVICE VIEW
-                 if self.selected_track < self.tracks.len() {
-                    let track = &mut self.tracks[self.selected_track];
-                    
-                    ui::device::show_device_view(
-                        ui, 
-                        &self.plugin_params, 
-                        &mut track.parameters, 
-                        &self.messenger, 
-                        self.selected_track
-                    );
-                 } else {
-                     ui.label("No Track Selected");
-                 }
-                 
-                 ui.separator();
-
-                 // MAIN LAYOUT
-                 // 1. Session Matrix (Top)
+                 // SESSION MATRIX
                  ui::session::show_matrix(
                      ui, 
                      &mut self.tracks, 
@@ -548,59 +584,35 @@ impl eframe::App for OmniApp {
                      &self.deferred_track_remove,
                      &mut self.pending_note_names_rx,
                  );
-
-                 ui.separator();
-
-                 // 2. Piano Roll (Bottom)
-                 let track_len = self.tracks.len();
-                 if self.selected_track < track_len {
-                     let track = &mut self.tracks[self.selected_track];
-                     let clip_len = track.clips.len();
-                     if self.selected_clip < clip_len {
-                         let clip = &mut track.clips[self.selected_clip];
-                         
-                         ui::piano_roll::show_piano_roll(
-                             ui,
-                             clip,
-                             &mut self.piano_roll_state,
-                             &self.messenger,
-                             self.selected_track,
-                             self.selected_clip,
-                             &track.name,
-                             track.valid_notes.as_ref(),
-                             self.is_playing,
-                             self.global_sample_pos,
-                             self.bpm,
-                             if let Some(ref e) = self.engine { e.get_sample_rate() as f32 } else { 44100.0 },
-                             &mut self.selected_sequencer_lane,
-                             newly_touched_param,
-                             &self.plugin_params,
-                             &mut self.is_learning,
-                         );
-                     } else {
-                         ui.label("No Clip Selected");
-                     }
-                 } else {
-                     ui.label("No Track Selected");
+                 
+                 // Add Track Button in Session View
+                 if ui.button("+ Add Track").clicked() {
+                     let node = Box::new(omni_engine::nodes::GainNode::new(1.0));
+                     let _ = self.messenger.send(EngineCommand::AddTrackNode { 
+                         node, 
+                         name: format!("Track {}", self.tracks.len() + 1),
+                         plugin_path: None 
+                     });
+                     
+                     self.tracks.push(TrackData {
+                         name: format!("Track {}", self.tracks.len() + 1),
+                         ..Default::default()
+                     });
                  }
-
-            } else {
-                // Arrangement View
-                 self.arrangement_ui.show(
-                     ui, 
-                     &mut self.tracks, 
-                     self.bpm, 
-                     &self.messenger, 
-                     // loop_start (step)? signature says: _current_step: u32, playback_pos_samples: u64
-                     // Wait, let's check definition again.
-                     // pub fn show(..., tracks, bpm, sender, _current_step, playback_pos, sample_rate, pool)
-                     // So:
-                     self.current_step, // _current_step
-                     self.global_sample_pos, // playback_pos_samples (u64)
-                     if let Some(ref e) = self.engine { e.get_sample_rate() as f32 } else { 44100.0 },
-                     if let Some(ref e) = self.engine { Some(&e.audio_pool) } else { None },
-                 );
-            }
+                 
+             } else {
+                 // ARRANGEMENT VIEW
+                  self.arrangement_ui.show(
+                      ui, 
+                      &mut self.tracks, 
+                      self.bpm, 
+                      &self.messenger, 
+                      self.current_step, 
+                      self.global_sample_pos, 
+                      if let Some(ref e) = self.engine { e.get_sample_rate() as f32 } else { 44100.0 },
+                      if let Some(ref e) = self.engine { Some(&e.audio_pool) } else { None },
+                  );
+             }
         });
     }
 }

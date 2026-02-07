@@ -93,7 +93,7 @@ impl ArrangementUI {
 
         // --- DRAW RULER ---
         // Background
-        painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(30));
+        painter.rect_filled(ruler_rect, 0.0, crate::ui::theme::THEME.bg_medium);
         
         let visible_start_beat = (self.scroll_x / self.zoom_x).floor() as i64;
         let visible_width_beats = (max_rect.width() / self.zoom_x).ceil() as i64 + 1;
@@ -108,7 +108,7 @@ impl ArrangementUI {
                 // Major Tick (Bar/Beat)
                 // Assuming 4/4 for now
                 let is_bar = beat % 4 == 0;
-                let color = if is_bar { egui::Color32::WHITE } else { egui::Color32::from_gray(100) };
+                let color = if is_bar { crate::ui::theme::THEME.text_primary } else { crate::ui::theme::THEME.text_secondary };
                 let height = if is_bar { 15.0 } else { 8.0 };
                 
                 painter.line_segment(
@@ -123,7 +123,7 @@ impl ArrangementUI {
                         egui::Align2::LEFT_CENTER,
                         text,
                         egui::FontId::proportional(12.0),
-                        egui::Color32::WHITE,
+                        crate::ui::theme::THEME.text_primary,
                     );
                 }
             }
@@ -138,7 +138,7 @@ impl ArrangementUI {
              content_rect.min,
              egui::vec2(self.header_width, content_rect.height())
         );
-        painter.rect_filled(headers_rect, 0.0, egui::Color32::from_gray(40));
+        painter.rect_filled(headers_rect, 0.0, crate::ui::theme::THEME.bg_medium);
         
         // Draw Grid Background lines
         let grid_rect = egui::Rect::from_min_max(
@@ -169,15 +169,15 @@ impl ArrangementUI {
              // But `painter` ignores it unless we create a sub-painter with clip.
              // Let's just draw.
              
-             painter.rect_filled(header_item_rect, 0.0, egui::Color32::from_gray(50));
-             painter.rect_stroke(header_item_rect, 0.0, (1.0, egui::Color32::BLACK), egui::StrokeKind::Middle);
+             painter.rect_filled(header_item_rect, 0.0, crate::ui::theme::THEME.bg_light);
+             painter.rect_stroke(header_item_rect, 0.0, (1.0, crate::ui::theme::THEME.border), egui::StrokeKind::Middle);
              
              painter.text(
                  header_item_rect.left_center() + egui::vec2(10.0, 0.0),
                  egui::Align2::LEFT_CENTER,
                  &tracks[i].name,
                  egui::FontId::proportional(14.0),
-                 egui::Color32::WHITE
+                 crate::ui::theme::THEME.text_primary
              );
              
              // Draw Grid Row Background
@@ -185,7 +185,7 @@ impl ArrangementUI {
                  egui::pos2(grid_rect.min.x, screen_y),
                  egui::pos2(grid_rect.max.x, screen_y + self.zoom_y)
              );
-             painter.rect_stroke(row_rect, 0.0, (1.0, egui::Color32::from_gray(35)), egui::StrokeKind::Middle); // Horizontal divider
+             painter.rect_stroke(row_rect, 0.0, (1.0, crate::ui::theme::THEME.grid_line), egui::StrokeKind::Middle); // Horizontal divider
              
              // --- DRAW CLIPS ---
              // Use index loop to avoid immutable borrow of tracks[i] preventing mutation later

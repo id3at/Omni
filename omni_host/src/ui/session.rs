@@ -34,7 +34,7 @@ pub fn show_matrix(
                     egui::Align2::CENTER_CENTER,
                     "Master",
                     egui::FontId::proportional(18.0), 
-                    theme::COLOR_TEXT_WHITE,
+                    theme::THEME.text_primary,
                 );
                 ui.add_space(5.0);
                 
@@ -75,7 +75,7 @@ pub fn show_matrix(
                         // I'll duplicate for now to avoid micro-fragmentation, or extract if needed.
                         
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(theme::TRACK_WIDTH, theme::HEADER_HEIGHT), egui::Sense::click());
-                        let bg_color = if resp.hovered() { theme::COLOR_TRACK_BG_HOVER } else { theme::COLOR_TRACK_BG_NORMAL };
+                        let bg_color = if resp.hovered() { theme::THEME.bg_light } else { theme::THEME.bg_medium };
                         ui.painter().rect_filled(rect, 2.0, bg_color);
                         
                         ui.painter().text(
@@ -83,7 +83,7 @@ pub fn show_matrix(
                             egui::Align2::CENTER_CENTER,
                             &track.name,
                             egui::TextStyle::Body.resolve(ui.style()), 
-                            theme::COLOR_TEXT_WHITE,
+                            theme::THEME.text_primary,
                         );
                         
                         if resp.clicked() {
@@ -106,7 +106,7 @@ pub fn show_matrix(
                             }
 
                             // Colors
-                            let base_color = if is_active { clip.color } else { theme::COLOR_CLIP_INACTIVE };
+                            let base_color = if is_active { clip.color } else { theme::THEME.clip_inactive };
                             
                             let final_color = if is_selected {
                                 egui::Color32::from_rgb(
@@ -119,7 +119,7 @@ pub fn show_matrix(
                             };
                             
                             let stroke_width = if is_selected { 2.0 } else { 0.0 };
-                            let stroke_color = if is_selected { theme::COLOR_SELECTED_STROKE } else { egui::Color32::BLACK };
+                            let stroke_color = if is_selected { theme::THEME.accent_secondary } else { theme::THEME.border };
 
                             ui.painter().rect_filled(rect, 2.0, final_color);
                             if stroke_width > 0.0 {
@@ -146,7 +146,7 @@ pub fn show_matrix(
                                 egui::Align2::CENTER_CENTER,
                                 icon,
                                 egui::FontId::proportional(14.0),
-                                theme::COLOR_TEXT_WHITE
+                                theme::THEME.text_primary
                             );
                         }
 
