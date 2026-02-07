@@ -392,7 +392,15 @@ impl eframe::App for OmniApp {
                 }
                 
                 let rec_color = if self.is_recording { crate::ui::theme::THEME.accent_warn } else { crate::ui::theme::THEME.text_secondary };
-                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new(egui::RichText::new("●").color(rec_color))).clicked() {
+                
+                let (rec_rect, rec_resp) = ui.allocate_exact_size(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Sense::click());
+                if rec_resp.hovered() {
+                    ui.painter().rect_filled(rec_rect, 2.0, crate::ui::theme::THEME.bg_light);
+                }
+                
+                ui.painter().circle_filled(rec_rect.center(), 6.0, rec_color);
+
+                if rec_resp.clicked() {
                     self.is_recording = !self.is_recording;
                     if self.is_recording {
                         let _ = self.messenger.send(EngineCommand::StartRecording);
@@ -499,7 +507,7 @@ impl eframe::App for OmniApp {
                 
                 ui.separator();
 
-                let view_btn_icon = if self.show_arrangement_view { "⊞" } else { "☰" };
+                let view_btn_icon = if self.show_arrangement_view { "|||" } else { "☰" };
                 let hover_text = if self.show_arrangement_view { "Switch to Session View" } else { "Switch to Arrangement View" };
                 if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new(view_btn_icon)).on_hover_text(hover_text).clicked() {
                     self.show_arrangement_view = !self.show_arrangement_view;
