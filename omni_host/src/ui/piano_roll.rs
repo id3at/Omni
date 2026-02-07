@@ -4,6 +4,92 @@ use omni_engine::EngineCommand;
 use crate::ClipData;
 
 use crate::sequencer_ui::SequencerUI;
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+
+// ============================================================================
+// CLIPBOARD (Static for Copy/Paste across clips)
+// ============================================================================
+
+lazy_static! {
+    static ref NOTE_CLIPBOARD: Mutex<Vec<omni_shared::project::Note>> = Mutex::new(Vec::new());
+}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+
+
+const DEFAULT_ZOOM_X: f32 = 50.0;
+const DEFAULT_ZOOM_Y: f32 = 20.0;
+const DEFAULT_SCROLL_Y: f32 = 60.0 * DEFAULT_ZOOM_Y;
+const DEFAULT_NOTE_LENGTH: f64 = 0.25;
+const LOOP_MARKER_HIT_WIDTH: f32 = 16.0;
+
+const MIN_NOTE_DURATION: f64 = 0.125;
+const DEFAULT_VELOCITY: u8 = 100;
+
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum SnapGrid {
+    Off,
+    Beat,      // 1.0
+    Half,      // 0.5
+    #[default]
+    Quarter,   // 0.25
+    Eighth,    // 0.125
+    Sixteenth, // 0.0625
+}
+
+impl SnapGrid {
+    pub fn value(&self) -> Option<f64> {
+        match self {
+            Self::Off => None,
+            Self::Beat => Some(1.0),
+            Self::Half => Some(0.5),
+            Self::Quarter => Some(0.25),
+            Self::Eighth => Some(0.125),
+            Self::Sixteenth => Some(0.0625),
+        }
+    }
+    
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::Beat => "1",
+            Self::Half => "1/2",
+            Self::Quarter => "1/4",
+            Self::Eighth => "1/8",
+            Self::Sixteenth => "1/16",
+        }
+    }
+    
+    pub fn all() -> &'static [SnapGrid] {
+        &[Self::Off, Self::Beat, Self::Half, Self::Quarter, Self::Eighth, Self::Sixteenth]
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum NoteAction {
+    Delete,
+    SelectExclusive,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ExpressionMode {
+    Velocity,
+    Probability,
+    VelocityDeviation,
+}
+
+// ============================================================================
+// STATE
+// ============================================================================
 
 pub struct PianoRollState {
     pub scroll_x: f32,
@@ -16,23 +102,143 @@ pub struct PianoRollState {
     // Loop marker drag state
     pub loop_drag_original: Option<f64>,
     pub loop_drag_accumulated: f32,
+    // Snap grid
+    pub snap_grid: SnapGrid,
+    // Marquee selection
+    pub marquee_start: Option<egui::Pos2>,
+    pub marquee_current: Option<egui::Pos2>,
+    // Undo
+    pub undo_stack: Vec<Vec<omni_shared::project::Note>>,
+    pub redo_stack: Vec<Vec<omni_shared::project::Note>>,
+    // Internal flag for undo capture
+    pub pending_undo: bool,
+    // Active expression lane mode
+    pub expression_mode: ExpressionMode,
 }
 
 impl Default for PianoRollState {
     fn default() -> Self {
         Self {
             scroll_x: 0.0,
-            scroll_y: 60.0 * 20.0,
-            zoom_x: 50.0,
-            zoom_y: 20.0,
+            scroll_y: DEFAULT_SCROLL_Y,
+            zoom_x: DEFAULT_ZOOM_X,
+            zoom_y: DEFAULT_ZOOM_Y,
             drag_original_note: None,
             drag_accumulated_delta: egui::Vec2::ZERO,
-            last_note_length: 0.25,
+            last_note_length: DEFAULT_NOTE_LENGTH,
             loop_drag_original: None,
             loop_drag_accumulated: 0.0,
+            snap_grid: SnapGrid::default(),
+            marquee_start: None,
+            marquee_current: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending_undo: false,
+            expression_mode: ExpressionMode::Velocity,
         }
     }
 }
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Snap a value to the nearest grid point, if snap is enabled
+fn snap_to_grid(value: f64, snap: Option<f64>) -> f64 {
+    match snap {
+        Some(grid) if grid > 0.0 => (value / grid).round() * grid,
+        _ => value,
+    }
+}
+
+/// Send a toggle note command to the engine
+pub fn send_toggle_note(
+    sender: &Sender<EngineCommand>,
+    track_idx: usize,
+    clip_idx: usize,
+    note: &omni_shared::project::Note,
+) {
+    let _ = sender.send(EngineCommand::ToggleNote {
+        track_index: track_idx,
+        clip_index: clip_idx,
+        start: note.start,
+        duration: note.duration,
+        note: note.key,
+        velocity: note.velocity,
+        probability: note.probability,
+        velocity_deviation: note.velocity_deviation,
+        condition: note.condition,
+    });
+}
+
+pub fn send_remove_note(
+    sender: &Sender<EngineCommand>,
+    track_index: usize,
+    clip_index: usize,
+    note: &omni_shared::project::Note,
+) {
+    let _ = sender.send(EngineCommand::RemoveNote {
+        track_index,
+        clip_index,
+        start: note.start,
+        note: note.key,
+    });
+}
+
+/// Push current notes state to undo stack
+pub fn push_undo(state: &mut PianoRollState, notes: &[omni_shared::project::Note]) {
+    state.undo_stack.push(notes.to_vec());
+    state.redo_stack.clear();
+    // Limit undo stack size
+    if state.undo_stack.len() > 50 {
+        state.undo_stack.remove(0);
+    }
+}
+
+/// Delete all selected notes
+fn delete_selected_notes(
+    clip: &mut ClipData,
+    sender: &Sender<EngineCommand>,
+    track_idx: usize,
+    clip_idx: usize,
+    state: &mut PianoRollState,
+) {
+    push_undo(state, &clip.notes);
+    let to_delete: Vec<_> = clip.notes.iter().filter(|n| n.selected).cloned().collect();
+    clip.notes.retain(|n| !n.selected);
+    for note in to_delete {
+        send_remove_note(sender, track_idx, clip_idx, &note);
+    }
+}
+
+/// Duplicate selected notes (offset by 1 beat)
+fn duplicate_selected_notes(
+    clip: &mut ClipData,
+    sender: &Sender<EngineCommand>,
+    track_idx: usize,
+    clip_idx: usize,
+    state: &mut PianoRollState,
+) {
+    push_undo(state, &clip.notes);
+    let selected: Vec<_> = clip.notes.iter().filter(|n| n.selected).cloned().collect();
+    
+    // Deselect originals
+    for note in &mut clip.notes {
+        note.selected = false;
+    }
+    
+    // Add duplicates offset by 1 beat
+    for mut note in selected {
+        note.start += 1.0;
+        note.selected = true;
+        clip.notes.push(note.clone());
+        send_toggle_note(sender, track_idx, clip_idx, &note);
+    }
+}
+
+// ============================================================================
+// MAIN FUNCTION
+// ============================================================================
 
 // Function signature needs to match what logic requires
 pub fn show_piano_roll(
@@ -100,17 +306,120 @@ pub fn show_piano_roll(
                 });
             }
         } else {
-            ui.label("Controls: [LMB] Add Note | [RMB] Delete | [MMB/Mwheel] Pan | [Ctrl+Wheel] Zoom");
+            // ================================================================
+            // TOOLBAR
+            // ================================================================
+            ui.horizontal(|ui| {
+                ui.label("Snap:");
+                for grid in SnapGrid::all() {
+                    let is_selected = state.snap_grid == *grid;
+                    let btn = egui::Button::new(grid.label())
+                        .fill(if is_selected { crate::ui::theme::THEME.accent_primary } else { crate::ui::theme::THEME.bg_dark });
+                    if ui.add(btn).clicked() {
+                        state.snap_grid = *grid;
+                    }
+                }
+                
+                ui.separator();
+                ui.label("Keys: Del=Delete | Ctrl+A=All | Ctrl+D=Duplicate | Ctrl+Z=Undo");
+            });
+            
+            // ================================================================
+            // KEYBOARD SHORTCUTS
+            // ================================================================
+            ui.input(|i| {
+                // Delete selected notes
+                if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
+                    delete_selected_notes(clip, sender, track_idx, clip_idx, state);
+                }
+                // Select all (Ctrl+A)
+                if i.modifiers.ctrl && i.key_pressed(egui::Key::A) {
+                    for note in &mut clip.notes {
+                        note.selected = true;
+                    }
+                }
+                // Duplicate (Ctrl+D)
+                if i.modifiers.ctrl && i.key_pressed(egui::Key::D) {
+                    duplicate_selected_notes(clip, sender, track_idx, clip_idx, state);
+                }
+                // Undo (Ctrl+Z)
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Z) {
+                    if let Some(prev_notes) = state.undo_stack.pop() {
+                        state.redo_stack.push(clip.notes.clone());
+                        // Remove current notes from engine
+                        for note in &clip.notes {
+                            send_remove_note(sender, track_idx, clip_idx, note);
+                        }
+                        // Add restored notes to engine
+                        for note in &prev_notes {
+                            send_toggle_note(sender, track_idx, clip_idx, note);
+                        }
+                        clip.notes = prev_notes;
+                    }
+                }
+                // Redo (Ctrl+Shift+Z)
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Z) {
+                    if let Some(next_notes) = state.redo_stack.pop() {
+                        state.undo_stack.push(clip.notes.clone());
+                        // Remove current notes from engine (Use RemoveNote for safety)
+                        for note in &clip.notes {
+                            send_remove_note(sender, track_idx, clip_idx, note);
+                        }
+                        // Add restored notes to engine
+                        for note in &next_notes {
+                            send_toggle_note(sender, track_idx, clip_idx, note);
+                        }
+                        clip.notes = next_notes;
+                    }
+                }
+                // Copy (Ctrl+C)
+                if i.modifiers.ctrl && i.key_pressed(egui::Key::C) {
+                    let selected: Vec<_> = clip.notes.iter()
+                        .filter(|n| n.selected)
+                        .cloned()
+                        .collect();
+                    if !selected.is_empty() {
+                        *NOTE_CLIPBOARD.lock().unwrap() = selected;
+                    }
+                }
+                // Paste (Ctrl+V)
+                if i.modifiers.ctrl && i.key_pressed(egui::Key::V) {
+                    let clipboard = NOTE_CLIPBOARD.lock().unwrap();
+                    if !clipboard.is_empty() {
+                        push_undo(state, &clip.notes);
+                        
+                        // Find the earliest start in clipboard to calculate relative offset
+                        let min_start = clipboard.iter().map(|n| n.start).fold(f64::INFINITY, f64::min);
+                        
+                        // Find current playhead or use end of existing notes
+                        let paste_at = clip.notes.iter()
+                            .filter(|n| n.selected)
+                            .map(|n| n.start + n.duration)
+                            .fold(0.0f64, f64::max);
+                        
+                        // Deselect all existing
+                        for note in &mut clip.notes {
+                            note.selected = false;
+                        }
+                        
+                        // Paste with offset
+                        for clipboard_note in clipboard.iter() {
+                            let mut new_note = clipboard_note.clone();
+                            new_note.start = paste_at + (clipboard_note.start - min_start);
+                            new_note.selected = true;
+                            clip.notes.push(new_note.clone());
+                            send_toggle_note(sender, track_idx, clip_idx, &new_note);
+                        }
+                    }
+                }
+            });
 
         // 1. Layout: Vertical Split (Piano Roll vs Note Expressions)
         // We render them sequentially to avoid jumping.
         let available_size = ui.available_size();
-        // Piano Roll takes remaining height (expressions handled by TopBottomPanel in Main, OR we assume Main handles Expressions?)
-        // In original Main, Expressions were in TopBottomPanel::bottom, OUTSIDE this closure.
-        // So here we just render the Piano Roll rect.
-        // The original code calculated height: `(available_size.y).max(200.0)`.
         
-        let piano_height = (available_size.y).max(200.0);
+        // Use full available height for piano roll (parent controls size)
+        let piano_height = available_size.y;
         
         // Use Sense::hover() for main rect - we handle specific interactions manually
         // This prevents the main rect from "stealing" drag events from child elements like loop marker
@@ -171,11 +480,10 @@ pub fn show_piano_roll(
         let loop_x = piano_rect.left() + (clip.length as f32 * beat_width) - state.scroll_x;
         
         // Interaction Layer for Loop Marker - with wider hit area for better grabbing
-        let marker_hit_width = 16.0;
-        if loop_x > piano_rect.left() - marker_hit_width && loop_x < piano_rect.right() + marker_hit_width {
+        if loop_x > piano_rect.left() - LOOP_MARKER_HIT_WIDTH && loop_x < piano_rect.right() + LOOP_MARKER_HIT_WIDTH {
             let marker_rect = egui::Rect::from_min_size(
-                egui::pos2(loop_x - marker_hit_width/2.0, piano_rect.top()), 
-                egui::vec2(marker_hit_width, piano_rect.height())
+                egui::pos2(loop_x - LOOP_MARKER_HIT_WIDTH/2.0, piano_rect.top()), 
+                egui::vec2(LOOP_MARKER_HIT_WIDTH, piano_rect.height())
             );
             
             let marker_response = ui.allocate_rect(marker_rect, egui::Sense::drag());
@@ -308,8 +616,7 @@ pub fn show_piano_roll(
         }
         
         // 5. Draw Notes & Handle Interactions
-        let mut note_actions = Vec::new(); // (ActionType, NoteIdx, NewNoteData)
-        // ActionType: 0 = Move, 1 = Resize, 2 = Delete, 3 = Select Exclusive
+        let mut note_actions: Vec<(NoteAction, usize, omni_shared::project::Note)> = Vec::new();
         
         for (idx, note) in clip.notes.iter_mut().enumerate() {
             let x = piano_rect.left() + (note.start as f32 * beat_width) - state.scroll_x;
@@ -339,7 +646,7 @@ pub fn show_piano_roll(
                     
                     // Eraser
                     if ui.rect_contains_pointer(note_rect) && ui.input(|i| i.pointer.secondary_down()) {
-                        note_actions.push((2, idx, note.clone()));
+                        note_actions.push((NoteAction::Delete, idx, note.clone()));
                         note_interacted_this_frame = true;
                         continue; 
                     }
@@ -362,46 +669,26 @@ pub fn show_piano_roll(
                     if resize_response.drag_started() {
                         state.drag_original_note = Some(note.clone());
                         state.drag_accumulated_delta = egui::Vec2::ZERO;
+                        state.pending_undo = true;
                     }
                     
-                    if resize_response.dragged() {
+                    if resize_response.dragged() && !state.pending_undo {
                         state.drag_accumulated_delta += resize_response.drag_delta();
                         if let Some(orig) = &state.drag_original_note {
                             let delta_beats = state.drag_accumulated_delta.x / beat_width;
-                            note.duration = (orig.duration + delta_beats as f64).max(0.125); 
+                            let raw_duration = (orig.duration + delta_beats as f64).max(MIN_NOTE_DURATION);
                             
-                            // Optional Snap
-                            if !ui.input(|i| i.modifiers.shift) {
-                                let snap = 0.25;
-                                note.duration = (note.duration / snap).round() * snap;
-                                if note.duration < snap { note.duration = snap; }
-                            }
+                            // Snap only if Shift not held
+                            let snap = if ui.input(|i| i.modifiers.shift) { None } else { state.snap_grid.value() };
+                            note.duration = snap_to_grid(raw_duration, snap).max(MIN_NOTE_DURATION);
                         }
                     }
                     
                     if resize_response.drag_stopped() {
                         if let Some(orig) = &state.drag_original_note {
-                            // Copy logic from main: toggle off/on
-                            let _ = sender.send(EngineCommand::ToggleNote {
-                                track_index: track_idx,
-                                clip_index: clip_idx,
-                                start: orig.start,
-                                duration: orig.duration,
-                                note: orig.key,
-                                probability: orig.probability,
-                                velocity_deviation: orig.velocity_deviation,
-                                condition: orig.condition,
-                            });
-                            let _ = sender.send(EngineCommand::ToggleNote {
-                                track_index: track_idx,
-                                clip_index: clip_idx,
-                                start: note.start,
-                                duration: note.duration,
-                                note: note.key,
-                                probability: note.probability,
-                                velocity_deviation: note.velocity_deviation,
-                                condition: note.condition,
-                            });
+                            // Toggle off old (Remove), toggle on new (Add)
+                            send_remove_note(sender, track_idx, clip_idx, orig);
+                            send_toggle_note(sender, track_idx, clip_idx, note);
                             state.last_note_length = note.duration; 
                         }
                         state.drag_original_note = None;
@@ -419,20 +706,21 @@ pub fn show_piano_roll(
                             if ui.input(|i| i.modifiers.ctrl) {
                                 note.selected = !note.selected;
                             } else {
-                                note_actions.push((3, idx, note.clone()));
+                                note_actions.push((NoteAction::SelectExclusive, idx, note.clone()));
                             }
                         }
                         
                         if body_response.drag_started() {
                             if !note.selected {
                                 note.selected = true;
-                                note_actions.push((3, idx, note.clone()));
+                                note_actions.push((NoteAction::SelectExclusive, idx, note.clone()));
                             }
                             state.drag_original_note = Some(note.clone());
                             state.drag_accumulated_delta = egui::Vec2::ZERO;
+                            state.pending_undo = true;
                         }
                         
-                        if body_response.dragged() {
+                        if body_response.dragged() && !state.pending_undo {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                             state.drag_accumulated_delta += body_response.drag_delta();
                             
@@ -442,11 +730,9 @@ pub fn show_piano_roll(
                                 
                                 note.start = (orig.start + delta_beats as f64).max(0.0);
                                 
-                                // Snap Beat
-                                if !ui.input(|i| i.modifiers.shift) {
-                                    let snap = 0.25;
-                                    note.start = (note.start / snap).round() * snap;
-                                }
+                                // Snap Beat (unless Shift held)
+                                let snap = if ui.input(|i| i.modifiers.shift) { None } else { state.snap_grid.value() };
+                                note.start = snap_to_grid(note.start, snap);
                                 
                                 // Snap Key (Integral)
                                 let new_key = (orig.key as f32 + delta_keys).clamp(0.0, 127.0) as u8;
@@ -464,27 +750,9 @@ pub fn show_piano_roll(
                         
                         if body_response.drag_stopped() {
                             if let Some(orig) = &state.drag_original_note {
-                                // Update Engine
-                                let _ = sender.send(EngineCommand::ToggleNote {
-                                    track_index: track_idx,
-                                    clip_index: clip_idx,
-                                    start: orig.start,
-                                    duration: orig.duration,
-                                    note: orig.key,
-                                    probability: orig.probability,
-                                    velocity_deviation: orig.velocity_deviation,
-                                    condition: orig.condition,
-                                });
-                                let _ = sender.send(EngineCommand::ToggleNote {
-                                    track_index: track_idx,
-                                    clip_index: clip_idx,
-                                    start: note.start,
-                                    duration: note.duration,
-                                    note: note.key,
-                                    probability: note.probability,
-                                    velocity_deviation: note.velocity_deviation,
-                                    condition: note.condition,
-                                });
+                                // Toggle off old (Remove), toggle on new (Add)
+                                send_remove_note(sender, track_idx, clip_idx, orig);
+                                send_toggle_note(sender, track_idx, clip_idx, note);
                             }
                             state.drag_original_note = None;
                         }
@@ -492,25 +760,25 @@ pub fn show_piano_roll(
             }
         }
         
+        // Handle deferred undo capture
+        if state.pending_undo {
+            push_undo(state, &clip.notes);
+            state.pending_undo = false;
+        }
+
         // Apply One-Shot Actions (Deletes)
         note_actions.sort_by(|a, b| b.1.cmp(&a.1));
         for (action, idx, note) in note_actions {
-            if action == 2 {
+            match action {
+                NoteAction::Delete => {
                     clip.notes.remove(idx);
-                    let _ = sender.send(EngineCommand::ToggleNote {
-                        track_index: track_idx,
-                        clip_index: clip_idx,
-                        start: note.start,
-                        duration: note.duration,
-                        note: note.key,
-                        probability: note.probability,
-                        velocity_deviation: note.velocity_deviation,
-                        condition: note.condition,
-                    });
-            } else if action == 3 {
-                // Exclusive select: deselect others
-                for (other_idx, other_note) in clip.notes.iter_mut().enumerate() {
-                    other_note.selected = other_idx == idx;
+                    send_toggle_note(sender, track_idx, clip_idx, &note);
+                }
+                NoteAction::SelectExclusive => {
+                    // Exclusive select: deselect others
+                    for (other_idx, other_note) in clip.notes.iter_mut().enumerate() {
+                        other_note.selected = other_idx == idx;
+                    }
                 }
             }
         }
@@ -524,11 +792,8 @@ pub fn show_piano_roll(
                         let local_y = pos.y - piano_rect.top() + state.scroll_y;
                         
                         let start_exact = local_x as f64 / beat_width as f64;
-                        let mut start = start_exact;
-                        if !ui.input(|i| i.modifiers.shift) {
-                            let snap = 0.25;
-                            start = (start / snap).round() * snap;
-                        }
+                        let snap = if ui.input(|i| i.modifiers.shift) { None } else { state.snap_grid.value() };
+                        let start = snap_to_grid(start_exact, snap);
                         
                         let row_idx = (local_y / note_height).floor();
                         let key = (127.0 - row_idx).clamp(0.0, 127.0) as u8;
@@ -554,7 +819,7 @@ pub fn show_piano_roll(
                                     start,
                                     duration: state.last_note_length,
                                     key,
-                                    velocity: 100,
+                                    velocity: DEFAULT_VELOCITY,
                                     selected: true,
                                     probability: 1.0,
                                     velocity_deviation: 0,
@@ -562,19 +827,79 @@ pub fn show_piano_roll(
                                 };
                                 clip.notes.push(new_note.clone());
                                 
-                                let _ = sender.send(EngineCommand::ToggleNote {
-                                    track_index: track_idx,
-                                    clip_index: clip_idx,
-                                    start: new_note.start,
-                                    duration: new_note.duration,
-                                    note: new_note.key,
-                                    probability: new_note.probability,
-                                    velocity_deviation: new_note.velocity_deviation,
-                                    condition: new_note.condition,
-                                });
+                                send_toggle_note(sender, track_idx, clip_idx, &new_note);
                             }
                         }
                     }
+            }
+        }
+        
+        // ================================================================
+        // MARQUEE SELECTION
+        // ================================================================
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        let primary_released = ui.input(|i| i.pointer.primary_released());
+        
+        if !note_interacted_this_frame && piano_rect.contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or_default()) {
+            if primary_down && state.marquee_start.is_none() {
+                // Start marquee
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    state.marquee_start = Some(pos);
+                }
+            }
+        }
+        
+        if let Some(start) = state.marquee_start {
+            if let Some(current) = ui.input(|i| i.pointer.interact_pos()) {
+                state.marquee_current = Some(current);
+                
+                // Draw marquee rectangle
+                let marquee_rect = egui::Rect::from_two_pos(start, current);
+                painter.rect_stroke(
+                    marquee_rect,
+                    0.0,
+                    egui::Stroke::new(1.0, crate::ui::theme::THEME.accent_secondary),
+                    egui::StrokeKind::Middle
+                );
+                painter.rect_filled(
+                    marquee_rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(100, 150, 255, 30)
+                );
+            }
+            
+            // On release, select notes that intersect
+            if primary_released {
+                if let Some(current) = state.marquee_current {
+                    let marquee_rect = egui::Rect::from_two_pos(start, current);
+                    
+                    // Deselect all if not adding to selection
+                    if !ui.input(|i| i.modifiers.shift) && !ui.input(|i| i.modifiers.ctrl) {
+                        for note in &mut clip.notes {
+                            note.selected = false;
+                        }
+                    }
+                    
+                    // Select notes that intersect marquee
+                    for note in &mut clip.notes {
+                        let note_x = piano_rect.left() + (note.start as f32 * beat_width) - state.scroll_x;
+                        let note_y = piano_rect.top() + ((127 - note.key) as f32 * note_height) - state.scroll_y;
+                        let note_w = note.duration as f32 * beat_width;
+                        let note_h = note_height;
+                        
+                        let note_rect = egui::Rect::from_min_size(
+                            egui::pos2(note_x, note_y),
+                            egui::vec2(note_w, note_h)
+                        );
+                        
+                        if marquee_rect.intersects(note_rect) {
+                            note.selected = true;
+                        }
+                    }
+                }
+                
+                state.marquee_start = None;
+                state.marquee_current = None;
             }
         }
         
@@ -598,5 +923,7 @@ pub fn show_piano_roll(
                 );
             }
         }
+        
+        // Velocity Lane removed (moved to Note Expressions)
     }
 }

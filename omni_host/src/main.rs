@@ -368,13 +368,7 @@ impl eframe::App for OmniApp {
         }
     }
 
-        ui::note_expressions::show(
-            ctx, 
-            &mut self.tracks, 
-            self.selected_track, 
-            self.selected_clip, 
-            &self.messenger
-        );
+
 
         // 1. TOP PANEL: Transport & Global Controls
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
@@ -637,61 +631,79 @@ impl eframe::App for OmniApp {
         if !self.show_arrangement_view {
             egui::TopBottomPanel::bottom("detail_view")
                 .resizable(true)
-                .default_height(crate::ui::theme::PANEL_BOTTOM_DEFAULT_HEIGHT)
+                .min_height(300.0)
+                .max_height(800.0)
+                .default_height(400.0)
                 .show(ctx, |ui| {
-                    ui.vertical(|ui| {
-                         // DEVICE VIEW (Top half of bottom panel?)
-                         // Or just stack them.
-                         
-                         if self.selected_track < self.tracks.len() {
-                            let track = &mut self.tracks[self.selected_track];
-                            
-                            ui.collapsing("Device Parameters", |ui| {
-                                ui::device::show_device_view(
-                                    ui, 
-                                    &self.plugin_params, 
-                                    &mut track.parameters, 
-                                    &self.messenger, 
-                                    self.selected_track
-                                );
-                            });
-                         }
-                         
-                         ui.separator();
+                    // Fixed split: Device collapsible at top, then Piano Roll + Expressions
+                    if self.selected_track < self.tracks.len() {
+                        let track = &mut self.tracks[self.selected_track];
+                        
+                        ui.collapsing("Device Parameters", |ui| {
+                            ui::device::show_device_view(
+                                ui, 
+                                &self.plugin_params, 
+                                &mut track.parameters, 
+                                &self.messenger, 
+                                self.selected_track
+                            );
+                        });
+                    }
+                     
+                    ui.separator();
 
-                         // PIANO ROLL
-                         let track_len = self.tracks.len();
-                         if self.selected_track < track_len {
-                             let track = &mut self.tracks[self.selected_track];
-                             let clip_len = track.clips.len();
-                             if self.selected_clip < clip_len {
-                                 let clip = &mut track.clips[self.selected_clip];
-                                 
-                                 ui::piano_roll::show_piano_roll(
-                                     ui,
-                                     clip,
-                                     &mut self.piano_roll_state,
-                                     &self.messenger,
-                                     self.selected_track,
-                                     self.selected_clip,
-                                     &track.name,
-                                     track.valid_notes.as_ref(),
-                                     self.is_playing,
-                                     self.global_sample_pos,
-                                     self.bpm,
-                                     if let Some(ref e) = self.engine { e.get_sample_rate() as f32 } else { 44100.0 },
-                                     &mut self.selected_sequencer_lane,
-                                     newly_touched_param,
-                                     &self.plugin_params,
-                                     &mut self.is_learning,
-                                 );
-                             } else {
-                                 ui.centered_and_justified(|ui| ui.label("No Clip Selected"));
-                             }
-                         } else {
-                             ui.centered_and_justified(|ui| ui.label("No Track Selected"));
-                         }
-                    });
+                    // PIANO ROLL + Expressions: Use remaining space
+                    let track_len = self.tracks.len();
+                    if self.selected_track < track_len {
+                        let clip_len = self.tracks[self.selected_track].clips.len();
+                        if self.selected_clip < clip_len {
+                            // Expression Lane - FIRST (bottom panel, shown below)
+                            let expression_height = 100.0;
+                            
+                            egui::TopBottomPanel::bottom("expression_lane_inner")
+                                .resizable(false)
+                                .exact_height(expression_height)
+                                .show_inside(ui, |ui| {
+                                    ui::note_expressions::show(
+                                        ui,
+                                        &mut self.tracks,
+                                        self.selected_track,
+                                        self.selected_clip,
+                                        &self.messenger,
+                                        &mut self.piano_roll_state,
+                                    );
+                                });
+                            
+                            // Piano Roll takes remaining space - reborrow track here
+                            egui::CentralPanel::default()
+                                .show_inside(ui, |ui| {
+                                    let track = &mut self.tracks[self.selected_track];
+                                    let clip = &mut track.clips[self.selected_clip];
+                                    ui::piano_roll::show_piano_roll(
+                                        ui,
+                                        clip,
+                                        &mut self.piano_roll_state,
+                                        &self.messenger,
+                                        self.selected_track,
+                                        self.selected_clip,
+                                        &track.name,
+                                        track.valid_notes.as_ref(),
+                                        self.is_playing,
+                                        self.global_sample_pos,
+                                        self.bpm,
+                                        if let Some(ref e) = self.engine { e.get_sample_rate() as f32 } else { 44100.0 },
+                                        &mut self.selected_sequencer_lane,
+                                        newly_touched_param,
+                                        &self.plugin_params,
+                                        &mut self.is_learning,
+                                    );
+                                });
+                        } else {
+                            ui.centered_and_justified(|ui| ui.label("No Clip Selected"));
+                        }
+                    } else {
+                        ui.centered_and_justified(|ui| ui.label("No Track Selected"));
+                    }
                 });
         }
 

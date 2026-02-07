@@ -292,7 +292,7 @@ impl AudioEngine {
                                     }
                                 }
                             }
-                            EngineCommand::ToggleNote { track_index, clip_index, start, duration, note, probability, velocity_deviation, condition } => {
+                            EngineCommand::ToggleNote { track_index, clip_index, start, duration, note, velocity, probability, velocity_deviation, condition } => {
                                 if track_index < project.tracks.len() {
                                     if clip_index < project.tracks[track_index].clips.len() {
                                         let notes = &mut project.tracks[track_index].clips[clip_index].notes;
@@ -304,12 +304,47 @@ impl AudioEngine {
                                                 start,
                                                 duration,
                                                 key: note,
-                                                velocity: 100,
+                                                velocity,
                                                 probability,
                                                 velocity_deviation,
                                                 condition,
                                                 selected: false,
                                             });
+                                        }
+                                    }
+                                }
+                            }
+
+                            EngineCommand::RemoveNote { track_index, clip_index, start, note } => {
+                                let note_key = note;
+                                if track_index < project.tracks.len() {
+                                    let track = &mut project.tracks[track_index];
+                                    if clip_index < track.clips.len() {
+                                        let clip = &mut track.clips[clip_index];
+                                        if let Some(idx) = clip.notes.iter().position(|n| n.key == note_key && (n.start - start).abs() < 0.001) {
+                                            clip.notes.remove(idx);
+                                        }
+                                    }
+                                }
+                            }
+                            EngineCommand::UpdateNote { 
+                                track_index, clip_index, 
+                                old_start, old_note, 
+                                new_start, new_duration, new_note, new_velocity, new_probability, new_velocity_deviation, new_condition 
+                            } => {
+                                if track_index < project.tracks.len() {
+                                    let track = &mut project.tracks[track_index];
+                                    if clip_index < track.clips.len() {
+                                        let clip = &mut track.clips[clip_index];
+                                        if let Some(idx) = clip.notes.iter().position(|n| n.key == old_note && (n.start - old_start).abs() < 0.001) {
+                                            let note = &mut clip.notes[idx];
+                                            note.start = new_start;
+                                            note.duration = new_duration;
+                                            note.key = new_note;
+                                            note.velocity = new_velocity;
+                                            note.probability = new_probability;
+                                            note.velocity_deviation = new_velocity_deviation;
+                                            note.condition = new_condition;
                                         }
                                     }
                                 }
