@@ -36,7 +36,7 @@ pub fn show_matrix(
                     egui::FontId::proportional(18.0), 
                     theme::THEME.text_primary,
                 );
-                ui.add_space(5.0);
+                ui.add_space(theme::SPACING_SMALL);
                 
                 for scene_idx in 0..8 {
                     let btn_size = egui::vec2(theme::TRACK_WIDTH, theme::CLIP_HEIGHT); 
@@ -89,7 +89,7 @@ pub fn show_matrix(
                         if resp.clicked() {
                             *selected_track_idx = track_idx;
                         }
-                        ui.add_space(5.0);
+                        ui.add_space(theme::SPACING_SMALL);
                         
                         // 2. Clips
                         for (clip_idx, clip) in track.clips.iter_mut().enumerate() {
@@ -150,9 +150,9 @@ pub fn show_matrix(
                             );
                         }
 
-                        ui.add_space(10.0);
+                        ui.add_space(theme::SPACING_MEDIUM);
                         ui.separator();
-                        ui.add_space(5.0);
+                        ui.add_space(theme::SPACING_SMALL);
 
                         // 3. Track Controls (Mixer)
                         mixer::show_track_controls(
@@ -165,13 +165,13 @@ pub fn show_matrix(
                             engine_sample_rate
                         );
                         
-                        ui.add_space(10.0);
+                        ui.add_space(theme::SPACING_MEDIUM);
                     }); 
                 });
                 
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACING_SMALL);
                 ui.separator();
-                ui.add_space(4.0);
+                ui.add_space(theme::SPACING_SMALL);
             }
             
             // ADD TRACK COLUMN

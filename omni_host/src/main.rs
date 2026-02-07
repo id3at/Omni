@@ -379,7 +379,7 @@ impl eframe::App for OmniApp {
         // 1. TOP PANEL: Transport & Global Controls
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.set_height(30.0);
+                ui.set_height(crate::ui::theme::PANEL_TOP_HEIGHT);
                 
                 if ui.button(if self.is_playing { "STOP" } else { "PLAY" }).clicked() {
                     self.is_playing = !self.is_playing;
@@ -420,7 +420,7 @@ impl eframe::App for OmniApp {
                     let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
                 }
                 
-                ui.add_space(10.0);
+                ui.add_space(crate::ui::theme::SPACING_MEDIUM);
                 ui.label("Vol:");
                 if ui::widgets::knob_ui(ui, &mut self.master_volume, 0.0..=1.0).changed() {
                     let _ = self.messenger.send(EngineCommand::SetVolume(self.master_volume));
@@ -509,7 +509,7 @@ impl eframe::App for OmniApp {
         if !self.show_arrangement_view {
             egui::TopBottomPanel::bottom("detail_view")
                 .resizable(true)
-                .default_height(300.0)
+                .default_height(crate::ui::theme::PANEL_BOTTOM_DEFAULT_HEIGHT)
                 .show(ctx, |ui| {
                     ui.vertical(|ui| {
                          // DEVICE VIEW (Top half of bottom panel?)

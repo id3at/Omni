@@ -101,7 +101,7 @@ pub fn show_track_controls(
      // A. Header Row: Load | GUI | Mute | Stop | Delete
     ui.horizontal(|ui| {
         let btn_w = (ui.available_width() - 16.0) / 5.0; // 5 buttons now
-        let btn_size = egui::vec2(btn_w, 20.0);
+        let btn_size = egui::vec2(btn_w, theme::BUTTON_HEIGHT_SMALL);
         
         // Load
         if ui.add_sized(btn_size, egui::Button::new("📂")).clicked() {
@@ -171,11 +171,11 @@ pub fn show_track_controls(
         }
     });
 
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACING_MEDIUM);
 
     // B. Knobs Row: Volume | Pan
     ui.horizontal(|ui| {
-        let col_w = (ui.available_width() - 4.0) / 2.0;
+        let col_w = (ui.available_width() - theme::SPACING_SMALL) / 2.0;
         
         // Vol Col
         ui.vertical(|ui| {
@@ -205,5 +205,5 @@ pub fn show_track_controls(
         });
     });
 
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACING_MEDIUM);
 }

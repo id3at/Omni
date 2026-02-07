@@ -4,6 +4,18 @@ pub const TRACK_WIDTH: f32 = 90.0;
 pub const CLIP_HEIGHT: f32 = 30.0;
 pub const HEADER_HEIGHT: f32 = 30.0;
 
+// New Layout Constants
+pub const PANEL_TOP_HEIGHT: f32 = 30.0;
+pub const PANEL_BOTTOM_DEFAULT_HEIGHT: f32 = 300.0;
+pub const BUTTON_HEIGHT_SMALL: f32 = 20.0;
+pub const BUTTON_WIDTH_SMALL: f32 = 40.0;
+
+// Spacing
+pub const SPACING_SMALL: f32 = 4.0;
+pub const SPACING_MEDIUM: f32 = 8.0;
+pub const SPACING_LARGE: f32 = 16.0;
+pub const SPACING_XLARGE: f32 = 24.0;
+
 pub struct Theme {
     // Base Backgrounds
     pub bg_dark: Color32,   // Main background (darkest)
