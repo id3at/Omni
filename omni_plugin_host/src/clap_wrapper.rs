@@ -392,7 +392,7 @@ impl ClapPlugin {
                 port_index: 0,
                 channel: ev.channel as i16,
                 key: ev.note as i16,
-                velocity: (ev.velocity as f64 / 127.0),
+                velocity: (ev.velocity as f64 / 127.0).powi(2),
             });
 
             // Handle Detune
