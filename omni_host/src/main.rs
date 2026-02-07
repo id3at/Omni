@@ -381,7 +381,8 @@ impl eframe::App for OmniApp {
             ui.horizontal(|ui| {
                 ui.set_height(crate::ui::theme::PANEL_TOP_HEIGHT);
                 
-                if ui.button(if self.is_playing { "STOP" } else { "PLAY" }).clicked() {
+                let play_icon = if self.is_playing { "■" } else { "▶" };
+                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new(play_icon)).clicked() {
                     self.is_playing = !self.is_playing;
                     if self.is_playing {
                         let _ = self.messenger.send(EngineCommand::Play);
@@ -390,8 +391,8 @@ impl eframe::App for OmniApp {
                     }
                 }
                 
-                let rec_color = if self.is_recording { crate::ui::theme::THEME.accent_warn } else { egui::Color32::from_gray(50) };
-                if ui.add(egui::Button::new(if self.is_recording { "REC [ON]" } else { "REC [OFF]" }).fill(rec_color)).clicked() {
+                let rec_color = if self.is_recording { crate::ui::theme::THEME.accent_warn } else { crate::ui::theme::THEME.text_secondary };
+                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new(egui::RichText::new("●").color(rec_color))).clicked() {
                     self.is_recording = !self.is_recording;
                     if self.is_recording {
                         let _ = self.messenger.send(EngineCommand::StartRecording);
@@ -429,7 +430,7 @@ impl eframe::App for OmniApp {
                 ui.separator();
 
                 // Project Controls
-                if ui.button("New").clicked() {
+                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new("📄")).on_hover_text("New Project").clicked() {
                      let _ = self.messenger.send(EngineCommand::NewProject);
                      self.tracks.clear();
                      self.tracks.push(TrackData::default()); // Start with one track
@@ -440,7 +441,7 @@ impl eframe::App for OmniApp {
                      let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
                 }
                 
-                if ui.button("Save").clicked() {
+                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new("💾")).on_hover_text("Save Project").clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Omni Project", &["omni"]).save_file() {
                         let path_str = path.to_string_lossy().to_string();
                         
@@ -490,7 +491,7 @@ impl eframe::App for OmniApp {
                     }
                 }
 
-                if ui.button("Load").clicked() {
+                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new("📂")).on_hover_text("Load Project").clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Omni Project", &["omni"]).pick_file() {
                         self.load_project(path.to_string_lossy().to_string());
                     }
@@ -498,8 +499,9 @@ impl eframe::App for OmniApp {
                 
                 ui.separator();
 
-                let view_btn_text = if self.show_arrangement_view { "Session View" } else { "Arrangement View" };
-                if ui.button(view_btn_text).clicked() {
+                let view_btn_icon = if self.show_arrangement_view { "⊞" } else { "☰" };
+                let hover_text = if self.show_arrangement_view { "Switch to Session View" } else { "Switch to Arrangement View" };
+                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new(view_btn_icon)).on_hover_text(hover_text).clicked() {
                     self.show_arrangement_view = !self.show_arrangement_view;
                 }
             });
