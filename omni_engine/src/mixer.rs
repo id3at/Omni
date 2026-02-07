@@ -37,7 +37,7 @@ impl AudioBuffers {
         self.track_vols.resize(track_count, 1.0);
         self.track_pans.resize(track_count, 0.0);
         
-        let target_capacity = std::cmp::max(128, self.track_events.capacity());
+
         
         // Resize vectors of vectors
         if self.track_events.len() < track_count {

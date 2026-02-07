@@ -1,7 +1,7 @@
 use crate::commands::EngineCommand;
 use crate::graph::AudioGraph;
 use crate::nodes::{GainNode}; 
-use crate::plugin_node::PluginNode;
+
 use crate::sequencer::{Sequencer, StepGenerator};
 use crate::assets::AudioPool; // Added
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -19,9 +19,9 @@ use arc_swap::ArcSwap;
 pub struct AudioEngine {
     _stream: cpal::Stream,
     is_playing: Arc<AtomicBool>,
-    is_recording: Arc<AtomicBool>, // Recording to Arrangement
-    sample_position: Arc<AtomicU64>,
-    recording_start_sample: Arc<AtomicU64>, // Sample position when recording started
+    pub is_recording: Arc<AtomicBool>, // Recording to Arrangement
+    pub sample_position: Arc<AtomicU64>,
+    pub recording_start_sample: Arc<AtomicU64>, // Sample position when recording started
     _sequencer: Sequencer,
     current_step: Arc<AtomicU32>,
     pub sample_rate: u32,
@@ -141,7 +141,7 @@ impl AudioEngine {
                                 let project_bpm = project.bpm;
                                 let mut result_id = None;
                                 let mut target_ratio = 1.0;
-                                let mut source_id; // Uninitialized
+                                let source_id; // Uninitialized
                                 
                                 if let Some(track) = project.tracks.get(track_index) {
                                     if let Some(clip) = track.arrangement.clips.get(clip_index) {
@@ -369,7 +369,7 @@ impl AudioEngine {
                                 // We expect nodes to match tracks 1:1, but handle mismatches safely
                                 let mut nodes_iter = nodes.into_iter();
                                 
-                                for track in &project.tracks {
+                                for _track in &project.tracks {
                                     // Use provided node or fallback to GainNode
                                     let node: Box<dyn AudioNode> = nodes_iter.next().unwrap_or_else(|| {
                                         Box::new(GainNode::new(1.0))

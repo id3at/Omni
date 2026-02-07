@@ -48,7 +48,7 @@ impl AudioPool {
         // Actually, let's implement a robust loader.
         
         // Re-open for robust loading
-        let mut reader = hound::WavReader::open(path)?;
+        let reader = hound::WavReader::open(path)?;
         let spec = reader.spec();
         let raw_samples: Vec<f32> = match spec.sample_format {
             hound::SampleFormat::Float => reader.into_samples::<f32>().collect::<Result<Vec<_>, _>>()?,

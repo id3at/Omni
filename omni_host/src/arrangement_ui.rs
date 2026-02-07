@@ -6,7 +6,7 @@ use std::collections::HashMap;
 /// Cached waveform peaks for an asset at a specific resolution
 #[derive(Clone)]
 pub struct WaveformCache {
-    pub asset_id: u32,
+    pub _asset_id: u32,
     pub samples_per_peak: usize,
     pub peaks: Vec<(f32, f32)>, // (min, max) per pixel/column
 }
@@ -130,8 +130,8 @@ impl ArrangementUI {
         }
         
         // --- DRAW TRACKS ---
-        let visible_start_track = (self.scroll_y / self.zoom_y).floor() as usize;
-        let visible_count = (content_rect.height() / self.zoom_y).ceil() as usize + 1;
+        let _visible_start_track = (self.scroll_y / self.zoom_y).floor() as usize;
+        let _visible_count = (content_rect.height() / self.zoom_y).ceil() as usize + 1;
         
         // Headers Background
         let headers_rect = egui::Rect::from_min_size(
@@ -359,7 +359,7 @@ impl ArrangementUI {
                                     }
                                     
                                     self.waveform_cache.insert(asset_id, WaveformCache {
-                                        asset_id,
+                                        _asset_id: asset_id,
                                         samples_per_peak: samples_per_pixel,
                                         peaks,
                                     });
