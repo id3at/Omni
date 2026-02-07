@@ -459,11 +459,34 @@ impl eframe::App for OmniApp {
 
                 ui.separator();
 
-                // Project Controls
-                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new("📄")).on_hover_text("New Project").clicked() {
+                // Project Controls - New
+                let (new_rect, new_resp) = ui.allocate_exact_size(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Sense::click());
+                if new_resp.hovered() {
+                    ui.painter().rect_filled(new_rect, 2.0, crate::ui::theme::THEME.bg_light);
+                }
+                let icon_color = crate::ui::theme::THEME.text_secondary;
+                let c = new_rect.center();
+                // Document shape with folded corner
+                let doc_w = 10.0;
+                let doc_h = 14.0;
+                let fold = 4.0;
+                let doc_points = vec![
+                    c + egui::vec2(-doc_w/2.0, -doc_h/2.0),
+                    c + egui::vec2(doc_w/2.0 - fold, -doc_h/2.0),
+                    c + egui::vec2(doc_w/2.0, -doc_h/2.0 + fold),
+                    c + egui::vec2(doc_w/2.0, doc_h/2.0),
+                    c + egui::vec2(-doc_w/2.0, doc_h/2.0),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(doc_points, egui::Color32::TRANSPARENT, egui::Stroke::new(1.5, icon_color)));
+                // Fold line
+                ui.painter().line_segment([c + egui::vec2(doc_w/2.0 - fold, -doc_h/2.0), c + egui::vec2(doc_w/2.0 - fold, -doc_h/2.0 + fold)], egui::Stroke::new(1.0, icon_color));
+                ui.painter().line_segment([c + egui::vec2(doc_w/2.0 - fold, -doc_h/2.0 + fold), c + egui::vec2(doc_w/2.0, -doc_h/2.0 + fold)], egui::Stroke::new(1.0, icon_color));
+                
+                new_resp.clone().on_hover_text("New Project");
+                if new_resp.clicked() {
                      let _ = self.messenger.send(EngineCommand::NewProject);
                      self.tracks.clear();
-                     self.tracks.push(TrackData::default()); // Start with one track
+                     self.tracks.push(TrackData::default());
                      self.selected_track = 0;
                      self.last_selected_track = 9999;
                      self.selected_clip = 0;
@@ -471,7 +494,28 @@ impl eframe::App for OmniApp {
                      let _ = self.messenger.send(EngineCommand::SetBpm(self.bpm));
                 }
                 
-                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new("💾")).on_hover_text("Save Project").clicked() {
+                // Save Project
+                let (save_rect, save_resp) = ui.allocate_exact_size(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Sense::click());
+                if save_resp.hovered() {
+                    ui.painter().rect_filled(save_rect, 2.0, crate::ui::theme::THEME.bg_light);
+                }
+                let save_icon_color = crate::ui::theme::THEME.text_secondary;
+                let sc = save_rect.center();
+                // Floppy disk shape
+                let floppy_size = 12.0;
+                let floppy_rect = egui::Rect::from_center_size(sc, egui::vec2(floppy_size, floppy_size));
+                ui.painter().rect_stroke(floppy_rect, 1.0, egui::Stroke::new(1.5, save_icon_color), egui::StrokeKind::Outside);
+                // Label slot (top)
+                let label_w = 6.0;
+                let label_h = 4.0;
+                ui.painter().rect_filled(egui::Rect::from_center_size(sc + egui::vec2(0.0, -floppy_size/2.0 + label_h/2.0 + 1.0), egui::vec2(label_w, label_h)), 0.0, save_icon_color);
+                // Disk slot (bottom)
+                let disk_w = 8.0;
+                let disk_h = 5.0;
+                ui.painter().rect_stroke(egui::Rect::from_center_size(sc + egui::vec2(0.0, floppy_size/2.0 - disk_h/2.0 - 1.0), egui::vec2(disk_w, disk_h)), 0.0, egui::Stroke::new(1.0, save_icon_color), egui::StrokeKind::Outside);
+                
+                save_resp.clone().on_hover_text("Save Project");
+                if save_resp.clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Omni Project", &["omni"]).save_file() {
                         let path_str = path.to_string_lossy().to_string();
                         
@@ -487,16 +531,16 @@ impl eframe::App for OmniApp {
                         }
                         
                         let shared_project = Project {
-                            name: "Project".to_string(), // Add missing field
+                            name: "Project".to_string(),
                             bpm: self.bpm,
                             tracks: self.tracks.iter().enumerate().map(|(i, t)| {
                                 omni_shared::project::Track {
-                                    id: uuid::Uuid::new_v4(), // Generate temporary ID if we don't persist it in TrackData
+                                    id: uuid::Uuid::new_v4(),
                                     name: t.name.clone(),
                                     volume: t.volume,
                                     pan: t.pan,
                                     mute: t.mute,
-                                    solo: false, // Default false
+                                    solo: false,
                                     clips: t.clips.iter().map(|c| omni_shared::project::Clip {
                                         name: "Clip".to_string(),
                                         notes: c.notes.clone(),
@@ -514,14 +558,39 @@ impl eframe::App for OmniApp {
                             }).collect(),
                             arrangement_mode: false, 
                         };
-                        // Fix argument borrow type
                         if let Err(e) = save_project_file(&shared_project, &path_str) {
                             eprintln!("Failed to save project: {}", e);
                         }
                     }
                 }
 
-                if ui.add_sized(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Button::new("📂")).on_hover_text("Load Project").clicked() {
+                // Load Project
+                let (load_rect, load_resp) = ui.allocate_exact_size(egui::vec2(crate::ui::theme::BUTTON_WIDTH_SMALL, crate::ui::theme::BUTTON_HEIGHT_SMALL), egui::Sense::click());
+                if load_resp.hovered() {
+                    ui.painter().rect_filled(load_rect, 2.0, crate::ui::theme::THEME.bg_light);
+                }
+                let load_icon_color = crate::ui::theme::THEME.text_secondary;
+                let lc = load_rect.center();
+                // Folder shape
+                let folder_w = 14.0;
+                let folder_h = 10.0;
+                let tab_w = 5.0;
+                let tab_h = 2.0;
+                // Main folder body
+                ui.painter().rect_stroke(egui::Rect::from_center_size(lc + egui::vec2(0.0, tab_h/2.0), egui::vec2(folder_w, folder_h)), 1.0, egui::Stroke::new(1.5, load_icon_color), egui::StrokeKind::Outside);
+                // Tab on top left
+                ui.painter().rect_filled(egui::Rect::from_min_size(lc + egui::vec2(-folder_w/2.0, -folder_h/2.0 - tab_h/2.0), egui::vec2(tab_w, tab_h)), 1.0, load_icon_color);
+                // Arrow pointing up (load/open)
+                let arrow_size = 4.0;
+                let arrow_points = vec![
+                    lc + egui::vec2(0.0, -arrow_size/2.0),
+                    lc + egui::vec2(-arrow_size/2.0, arrow_size/2.0),
+                    lc + egui::vec2(arrow_size/2.0, arrow_size/2.0),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(arrow_points, load_icon_color, egui::Stroke::NONE));
+                
+                load_resp.clone().on_hover_text("Load Project");
+                if load_resp.clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Omni Project", &["omni"]).pick_file() {
                         self.load_project(path.to_string_lossy().to_string());
                     }
