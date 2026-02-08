@@ -449,12 +449,103 @@ impl Default for Track {
     }
 }
 
+/// Time signature representation
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TimeSignature {
+    pub numerator: u8,    // beats per bar (e.g., 4)
+    pub denominator: u8,  // beat unit (e.g., 4 = quarter note)
+}
+
+impl Default for TimeSignature {
+    fn default() -> Self {
+        Self { numerator: 4, denominator: 4 }
+    }
+}
+
+impl TimeSignature {
+    /// Beats per bar as float (e.g. 3/4 = 3.0, 6/8 = 3.0 in quarter-note beats)
+    pub fn beats_per_bar(&self) -> f64 {
+        self.numerator as f64 * (4.0 / self.denominator as f64)
+    }
+}
+
+/// Swing/groove template — applies micro-timing offsets to subdivisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrooveTemplate {
+    pub name: String,
+    pub swing_amount: f32,  // 0.0 = straight, 1.0 = full triplet swing
+    /// Per-step timing offsets in fraction of a subdivision (-0.5 to +0.5).
+    /// Length determines subdivision count (e.g., 16 = 16th notes per bar).
+    pub offsets: Vec<f32>,
+    /// Per-step velocity scaling (0.0 to 2.0, where 1.0 = no change).
+    pub velocity_scale: Vec<f32>,
+}
+
+impl Default for GrooveTemplate {
+    fn default() -> Self {
+        Self {
+            name: "Straight".to_string(),
+            swing_amount: 0.0,
+            offsets: Vec::new(),
+            velocity_scale: Vec::new(),
+        }
+    }
+}
+
+impl GrooveTemplate {
+    /// MPC-style swing: delays even-numbered 16th notes.
+    pub fn mpc_swing(amount: f32) -> Self {
+        let mut offsets = vec![0.0; 16];
+        let mut velocity_scale = vec![1.0; 16];
+        // Swing delays every other 16th note (1, 3, 5, ...)
+        for i in (1..16).step_by(2) {
+            offsets[i] = amount * 0.33; // Max 33% = triplet feel
+            velocity_scale[i] = 1.0 - amount * 0.15; // Slightly softer swung notes
+        }
+        Self {
+            name: format!("MPC Swing {:.0}%", amount * 100.0),
+            swing_amount: amount,
+            offsets,
+            velocity_scale,
+        }
+    }
+
+    /// Get timing offset for a given step index.
+    pub fn get_offset(&self, step: usize) -> f32 {
+        if self.offsets.is_empty() {
+            // Simple swing: delay odd steps
+            if step % 2 == 1 {
+                self.swing_amount * 0.33
+            } else {
+                0.0
+            }
+        } else {
+            let idx = step % self.offsets.len();
+            self.offsets[idx]
+        }
+    }
+
+    /// Get velocity scale for a given step index.
+    pub fn get_velocity_scale(&self, step: usize) -> f32 {
+        if self.velocity_scale.is_empty() {
+            1.0
+        } else {
+            let idx = step % self.velocity_scale.len();
+            self.velocity_scale[idx]
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     pub bpm: f32,
     pub tracks: Vec<Track>,
-    pub arrangement_mode: bool, // Added
+    pub arrangement_mode: bool,
+    #[serde(default)]
+    pub time_signature: TimeSignature,
+    #[serde(default)]
+    pub groove: GrooveTemplate,
 }
 
 impl Default for Project {
@@ -464,6 +555,8 @@ impl Default for Project {
             bpm: 120.0,
             tracks: Vec::new(),
             arrangement_mode: false,
+            time_signature: TimeSignature::default(),
+            groove: GrooveTemplate::default(),
         }
     }
 }

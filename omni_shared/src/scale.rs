@@ -157,6 +157,18 @@ impl Default for ChordType {
 }
 
 impl ChordType {
+    /// Constant array of all chord types for O(1) index lookup (no heap allocation).
+    const ALL: [ChordType; 12] = [
+        ChordType::None, ChordType::Major, ChordType::Minor, ChordType::Diminished,
+        ChordType::Sus2, ChordType::Sus4, ChordType::Maj7, ChordType::Min7,
+        ChordType::Dom7, ChordType::Major9, ChordType::Minor9, ChordType::Dom9,
+    ];
+
+    /// O(1) lookup by index — RT-safe, zero allocation.
+    pub fn from_index(idx: usize) -> Option<ChordType> {
+        Self::ALL.get(idx).copied()
+    }
+
     pub fn get_intervals(&self) -> &'static [u8] {
         match self {
             ChordType::None => &[],

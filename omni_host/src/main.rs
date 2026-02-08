@@ -556,7 +556,9 @@ impl eframe::App for OmniApp {
                                     arrangement: t.arrangement.clone(),
                                 }
                             }).collect(),
-                            arrangement_mode: false, 
+                            arrangement_mode: false,
+                            time_signature: omni_shared::project::TimeSignature::default(),
+                            groove: omni_shared::project::GrooveTemplate::default(),
                         };
                         if let Err(e) = save_project_file(&shared_project, &path_str) {
                             eprintln!("Failed to save project: {}", e);

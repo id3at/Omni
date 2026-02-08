@@ -9,6 +9,7 @@ pub mod resampler;
 pub mod mixer;
 pub mod commands;
 pub mod engine; // AudioEngine lives here
+pub mod export; // Offline export/bounce
 
 // Re-exports
 pub use commands::EngineCommand;

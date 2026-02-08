@@ -1,12 +1,16 @@
 use petgraph::graph::{DiGraph, NodeIndex};
-// use petgraph::visit::Topo;
 use crate::nodes::AudioNode;
 use omni_shared::MidiNoteEvent;
+use std::cell::UnsafeCell;
+
+/// Wrapper that allows parallel mutable access to distinct nodes in the graph.
+/// Safety: Caller MUST guarantee that NodeIndices are distinct across threads.
+struct UnsafeGraphCell(UnsafeCell<DiGraph<Box<dyn AudioNode>, ()>>);
+unsafe impl Sync for UnsafeGraphCell {}
 
 pub struct AudioGraph {
     graph: DiGraph<Box<dyn AudioNode>, ()>,
     // Processing Chains (Track paths)
-    // Each chain is a sequence of nodes: [Source, FX1, FX2...]
     chains: Vec<Vec<NodeIndex>>,
     // Buffers for parallel processing
     buffers: Vec<Vec<f32>>,
@@ -88,29 +92,31 @@ impl AudioGraph {
     }
 
     /// Parallel processing of specific nodes with provided buffers and events.
-    /// This allows the Engine to manage routing/mixing while leveraging the Graph for parallel node execution.
+    /// Safety: NodeIndices MUST be distinct — each rayon task accesses a different node.
+    /// Uses UnsafeCell wrapper to allow parallel &mut to distinct graph nodes.
     pub fn process_overlay(&mut self, nodes: &[NodeIndex], buffers: &mut [Vec<f32>], events: &[Vec<MidiNoteEvent>], param_events: &[Vec<omni_shared::ParameterEvent>], expression_events: &[Vec<omni_shared::ExpressionEvent>], sample_rate: f32) {
-        let graph_ptr = &mut self.graph as *mut DiGraph<Box<dyn AudioNode>, ()>;
-        let ptr_int = graph_ptr as usize;
-        
-        // Safety: The caller must ensure that the NodeIndices in work_items are distinct.
-        // In AudioEngine, track_node_indices are distinct plugins.
+        // Wrap graph in UnsafeCell for parallel mutable access to distinct nodes
+        let cell = UnsafeGraphCell(UnsafeCell::new(std::mem::take(&mut self.graph)));
+        let cell_ref = &cell;
         
         buffers.par_iter_mut()
             .enumerate()
-            .for_each(move |(i, buffer)| {
-                let graph_ref = unsafe { &mut *(ptr_int as *mut DiGraph<Box<dyn AudioNode>, ()>) };
-                // Bounds check should be unnecessary if caller ensures lengths match, but let's be safe(r) or just index.
+            .for_each(|(i, buffer)| {
                 if i < nodes.len() && i < events.len() && i < param_events.len() && i < expression_events.len() {
-                     let node_idx = nodes[i];
-                     let event_slice = &events[i];
-                     let param_event_slice = &param_events[i];
-                     let expr_event_slice = &expression_events[i];
-                     if let Some(node) = graph_ref.node_weight_mut(node_idx) {
-                         node.process(buffer, sample_rate, event_slice, param_event_slice, expr_event_slice);
-                     }
+                    let node_idx = nodes[i];
+                    let event_slice = &events[i];
+                    let param_event_slice = &param_events[i];
+                    let expr_event_slice = &expression_events[i];
+                    // Safety: Each iteration accesses a distinct NodeIndex (guaranteed by AudioEngine).
+                    let graph_ref = unsafe { &mut *cell_ref.0.get() };
+                    if let Some(node) = graph_ref.node_weight_mut(node_idx) {
+                        node.process(buffer, sample_rate, event_slice, param_event_slice, expr_event_slice);
+                    }
                 }
             });
+        
+        // Move graph back
+        self.graph = cell.0.into_inner();
     }
     
     pub fn node_mut(&mut self, idx: NodeIndex) -> Option<&mut Box<dyn AudioNode>> {

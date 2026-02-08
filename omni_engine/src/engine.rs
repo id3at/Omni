@@ -33,6 +33,7 @@ pub struct AudioEngine {
     pub drop_tx: Sender<Box<dyn AudioNode>>, // Off-thread dropping
     #[allow(dead_code)]
     recorder_cmd_tx: Sender<RecorderCommand>, // Added
+    pub peak_meters: Arc<crate::mixer::PeakMeters>, // Shared with UI
 }
 
 
@@ -126,6 +127,10 @@ impl AudioEngine {
         let max_tracks = 32;
         let max_buffer_size = 2048 * 2;
         let mut audio_buffers = crate::mixer::AudioBuffers::new(max_tracks, max_buffer_size);
+        
+        // Peak Meters (shared between audio thread and UI)
+        let peak_meters = Arc::new(crate::mixer::PeakMeters::new(max_tracks));
+        let peak_meters_callback = peak_meters.clone();
 
         // Initialize Recording Buffers (Zero-Allocation)
         // One RingBuffer per track. Producer -> Header, Consumer -> Recorder Thread.
@@ -145,6 +150,10 @@ impl AudioEngine {
         let mut track_delays: Vec<crate::delay::DelayLine> = Vec::new();
         
         let mut crossfade: f32 = 0.0; // 0.0 = Session, 1.0 = Arrangement
+        
+        // Throttle counters for debug logging (replaces unsafe static mut)
+        let mut rec_log_throttle: u64 = 0;
+        let mut rec_debug_throttle: u64 = 0;
         
         // Local buffer for parameter events to persist across command loop
         // (Since audio_buffers.prepare_buffers clears the main event vector)
@@ -257,6 +266,18 @@ impl AudioEngine {
                                     }
                                 }
                                 eprintln!("[Engine] Added arrangement clips to project");
+                            }
+                            EngineCommand::SetTimeSignature { numerator, denominator } => {
+                                project.time_signature = omni_shared::project::TimeSignature { numerator, denominator };
+                                eprintln!("[Engine] Time Signature: {}/{}", numerator, denominator);
+                            }
+                            EngineCommand::SetGroove(groove) => {
+                                eprintln!("[Engine] Groove: {}", groove.name);
+                                project.groove = groove;
+                            }
+                            EngineCommand::SetSwing(amount) => {
+                                project.groove = omni_shared::project::GrooveTemplate::mpc_swing(amount);
+                                eprintln!("[Engine] Swing: {:.0}%", amount * 100.0);
                             }
                             EngineCommand::SetPluginParam { track_index, id, value } => {
                                 // 1. Update Engine Node (Cache Only)
@@ -783,21 +804,15 @@ impl AudioEngine {
                                                      let asset_data = &asset.data;
                                                      // Safety check
                                                      if source_offset + length <= asset_data.len() {
-                                                         // Mix directly to master_mix (not track_bufs which gets overwritten)
-                                                         // Apply track volume, pan, and crossfade
-                                                         let mut l_gain = track_vol * crossfade;
-                                                         let mut r_gain = track_vol * crossfade;
-                                                         
-                                                         if track_pan > 0.0 {
-                                                             l_gain *= 1.0 - track_pan;
-                                                         } else if track_pan < 0.0 {
-                                                             r_gain *= 1.0 + track_pan;
-                                                         }
+                                                         // Mix directly to master_mix (mono source -> stereo)
+                                                         // Equal-power pan law + crossfade
+                                                         let (l_pan, r_pan) = crate::mixer::equal_power_pan(track_pan);
+                                                         let l_gain = track_vol * crossfade * l_pan;
+                                                         let r_gain = track_vol * crossfade * r_pan;
                                                          
                                                          for i in 0..length {
                                                              let sample = asset_data[source_offset + i];
                                                              let dst_idx = (buffer_offset + i) * 2;
-                                                             // Mix to master directly (mono source -> stereo)
                                                              audio_buffers.master_mix[dst_idx] += sample * l_gain;
                                                              audio_buffers.master_mix[dst_idx + 1] += sample * r_gain;
                                                          }
@@ -852,8 +867,9 @@ impl AudioEngine {
                                             let end_step_idx = (end_beat / step_dur_beats).ceil() as u64;
                                             
                                             for global_step_counter in start_step_idx..end_step_idx {
-                                                // Calculate offset in samples for this step trigger
-                                                let step_beat_time = global_step_counter as f64 * step_dur_beats;
+                                                // Apply groove/swing timing offset
+                                                let groove_offset = project.groove.get_offset(global_step_counter as usize) as f64 * step_dur_beats;
+                                                let step_beat_time = global_step_counter as f64 * step_dur_beats + groove_offset;
                                                 let offset_beats = step_beat_time - start_beat;
                                                 let offset_samples_raw = (offset_beats * samples_per_beat as f64) as i64;
                                                 
@@ -913,6 +929,10 @@ impl AudioEngine {
                                                 }
 
                                                 if velocity == 0 || vel_muted || pitch_muted { continue; } // Muted step
+                                                
+                                                // Apply groove velocity scaling
+                                                let groove_vel_scale = project.groove.get_velocity_scale(global_step_counter as usize);
+                                                velocity = ((velocity as f32 * groove_vel_scale).round().clamp(1.0, 127.0)) as u8;
                                                 
                                                 // 4. Get Gate
                                                 let gate_idx = StepGenerator::get_step_index(
@@ -990,21 +1010,16 @@ impl AudioEngine {
                                                     chord_type_id = fastrand::u8(0..=11); // Range of chords
                                                 }
 
-                                                // Resolve Chord Intervals
-                                                let mut pitches = Vec::new();
-                                                pitches.push(quantized_pitch);
+                                                // Resolve Chord Intervals (pre-allocated buffer, zero heap alloc)
+                                                audio_buffers.pitch_buf.clear();
+                                                audio_buffers.pitch_buf.push(quantized_pitch);
                                                 
                                                 if !chd_muted && chord_type_id > 0 {
-                                                     let types: Vec<omni_shared::scale::ChordType> = omni_shared::scale::ChordType::iter().collect();
-                                                     if let Some(ctype) = types.get(chord_type_id as usize) {
+                                                     if let Some(ctype) = omni_shared::scale::ChordType::from_index(chord_type_id as usize) {
                                                          for &interval in ctype.get_intervals() {
                                                              if interval == 0 { continue; } // Skip root, added already
                                                              let p = (quantized_pitch as i32 + interval as i32).clamp(0, 127) as u8;
-                                                             // Re-quantize chord notes? Usually yes to stay in scale.
-                                                             // Or strict parallel intervals? 
-                                                             // Thesys says "The resulting chord will be C minor" - implies STRICT intervals.
-                                                             // Let's stick strictly to intervals defined in ChordType relative to root.
-                                                             pitches.push(p);
+                                                             audio_buffers.pitch_buf.push(p);
                                                          }
                                                      }
                                                 }
@@ -1081,7 +1096,7 @@ impl AudioEngine {
                                                     let dur_beats = effective_gate as f64 * sub_dur_beats;
                                                     let dur_samples = (dur_beats * samples_per_beat as f64) as u64;
 
-                                                    for &base_p in &pitches {
+                                                    for &base_p in audio_buffers.pitch_buf.iter() {
                                                         // Apply cumulative pitch offset
                                                         let p = (base_p as i32 + pitch_accumulator).clamp(0, 127) as u8;
 
@@ -1146,7 +1161,7 @@ impl AudioEngine {
                                                     let dur_beats = gate_len as f64 * step_dur_beats;
                                                     let dur_samples = (dur_beats * samples_per_beat as f64) as u64;
 
-                                                    for &base_p in &pitches {
+                                                    for &base_p in audio_buffers.pitch_buf.iter() {
                                                         let p = base_p;
                                                         
                                                         // Note On
@@ -1328,8 +1343,8 @@ impl AudioEngine {
                         let current_sample = pos_counter.load(Ordering::Relaxed);
                         let song_pos_beats = (current_sample as f64) / samples_per_beat as f64;
                         
-                        // Calculate bar position (assuming 4/4 time signature)
-                        let beats_per_bar = 4.0;
+                        // Use project time signature for bar calculation
+                        let beats_per_bar = project.time_signature.beats_per_bar();
                         let bar_number = (song_pos_beats / beats_per_bar).floor() as i32;
                         let bar_start_beats = bar_number as f64 * beats_per_bar;
                         
@@ -1339,8 +1354,8 @@ impl AudioEngine {
                             song_pos_beats,
                             bar_start_beats,
                             bar_number,
-                            time_sig_num: 4,
-                            time_sig_denom: 4,
+                            time_sig_num: project.time_signature.numerator as u16,
+                            time_sig_denom: project.time_signature.denominator as u16,
                         });
                     }
 
@@ -1360,16 +1375,14 @@ impl AudioEngine {
                          track_delays.resize_with(track_count, || crate::delay::DelayLine::new(buffer_size_samples, sample_rate as f32));
                     }
 
-                    // Query Latencies
-                    let mut latencies: Vec<u32> = vec![0; track_count]; 
-                    let mut max_latency = 0;
+                    // Query Latencies (pre-allocated buffer, zero heap alloc)
+                    for l in audio_buffers.latencies[..track_count].iter_mut() { *l = 0; }
+                    let mut max_latency = 0u32;
                     
                     for (i, &node_idx) in track_node_indices.iter().enumerate() {
-                        // Unsafe access hack or just use node_mut? 
-                        // We have mut ref to graph.
                         if let Some(node) = graph.node_mut(node_idx) {
                              let l = node.get_latency();
-                             latencies[i] = l;
+                             audio_buffers.latencies[i] = l;
                              if l > max_latency { max_latency = l; }
                         }
                     }
@@ -1377,7 +1390,7 @@ impl AudioEngine {
                     // Apply Delays
                     if max_latency > 0 {
                          for i in 0..track_count {
-                              let needed_delay = max_latency - latencies[i];
+                              let needed_delay = max_latency - audio_buffers.latencies[i];
                               if needed_delay > 0 {
                                   // Use buf_slice to respect borrowing
                                   let track_buf = &mut buf_slice[i];
@@ -1395,29 +1408,27 @@ impl AudioEngine {
                          }
                     }
 
-                    // 4b. Mix to Master
-
-                    // 4. Mix to Master
-                    // 4. Mix to Master
+                    // 4b. Mix to Master (equal-power pan, trim, metering)
                     crate::mixer::AudioBuffers::mix_to_master(
                         &audio_buffers.track_bufs,
                         &mut audio_buffers.master_mix,
                         &audio_buffers.track_vols,
                         &audio_buffers.track_pans,
+                        &audio_buffers.track_trims,
                         frames,
-                        track_count
+                        track_count,
+                        Some(&peak_meters_callback),
                     );
                      
                      // 4c. Recording Capture (Session -> Arrangement)
                      // Capture audio only when recording in Session mode (not arrangement)
                      let is_rec = record_flag.load(Ordering::Relaxed);
                      if is_rec && !project.arrangement_mode && playing {
-                         // Log once per second approx
-                         static mut LAST_LOG: u64 = 0;
+                         // Log once per second approx (using closure-local counter, no UB)
                          let current_pos = pos_counter.load(Ordering::Relaxed);
-                         if unsafe { current_pos.saturating_sub(LAST_LOG) > sample_rate as u64 } {
+                         if current_pos.saturating_sub(rec_log_throttle) > sample_rate as u64 {
                              eprintln!("[Engine] Recording: capturing {} tracks, {} frames", track_count, frames);
-                             unsafe { LAST_LOG = current_pos };
+                             rec_log_throttle = current_pos;
                          }
                          
                          for t_idx in 0..track_count {
@@ -1435,12 +1446,11 @@ impl AudioEngine {
                                         }
                                     }
                                     
-                                    // Debug Log (Throttled)
-                                    static mut LAST_REC_DEBUG: u64 = 0;
+                                    // Debug Log (Throttled, closure-local counter)
                                     let pos = pos_counter.load(Ordering::Relaxed);
-                                    if unsafe { pos.saturating_sub(LAST_REC_DEBUG) > sample_rate as u64 * 2 } && (signal || dropped > 0) {
+                                    if pos.saturating_sub(rec_debug_throttle) > sample_rate as u64 * 2 && (signal || dropped > 0) {
                                         eprintln!("[Engine] Rec Track {}: Signal={}, Dropped={}, Frames={}", t_idx, signal, dropped, frames);
-                                        unsafe { LAST_REC_DEBUG = pos; }
+                                        rec_debug_throttle = pos;
                                     }
                                 }
                             }
@@ -1449,18 +1459,28 @@ impl AudioEngine {
                          pos_counter.fetch_add(frames as u64, Ordering::Relaxed);
                      }
                      
-                     // Interleave back to data
+                     // Interleave back to data (with soft-clip, dither, metering)
                      let gain = f32::from_bits(master_gain_callback.load(Ordering::Relaxed));
+
+                     // Master bus processing: soft-clip → dither → hard-clip → metering
+                     crate::mixer::AudioBuffers::master_finalize(
+                         &mut audio_buffers.master_mix,
+                         frames,
+                         gain,
+                         &mut audio_buffers.dither_state_l,
+                         &mut audio_buffers.dither_state_r,
+                         Some(&peak_meters_callback),
+                     );
 
                      for i in 0..frames {
                          let left = audio_buffers.master_mix[i * 2];
                          let right = audio_buffers.master_mix[i * 2 + 1];
 
                          if channels == 2 {
-                             data[i * 2] = left * gain;
-                             data[i * 2 + 1] = right * gain;
+                             data[i * 2] = left;
+                             data[i * 2 + 1] = right;
                          } else {
-                             data[i] = (left + right) * 0.5 * gain;
+                             data[i] = (left + right) * 0.5;
                          }
                      }
                 },
@@ -1484,6 +1504,7 @@ impl AudioEngine {
             audio_pool,
             drop_tx: drop_tx_struct,
             recorder_cmd_tx,
+            peak_meters,
         })
     }
 

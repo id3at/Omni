@@ -2505,7 +2505,6 @@ dependencies = [
  "crossbeam-channel",
  "fastrand",
  "hound",
- "lazy_static",
  "omni_shared",
  "petgraph",
  "rayon",

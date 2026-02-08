@@ -277,22 +277,26 @@ impl AudioNode for PluginNode {
             // std::sync::atomic::fence(Ordering::Release); // Ensure data is visible?
             std::ptr::write_volatile(&mut header.command, omni_shared::CMD_PROCESS);
             
-            // 4. Spin Wait
-            let mut spin_count = 0;
-            const TIMEOUT_SPINS: usize = 200000; // ~ 10ms at 2GHz?
+            // 4. Adaptive Spin Wait (3-tier: spin → pause → yield)
+            // Tier 1: Pure spin (0-100) — catches fast plugins (<50ns)
+            // Tier 2: PAUSE hint (100-2000) — power-efficient spin (~1-10μs)
+            // Tier 3: OS yield (2000+) — context switch but fair scheduling
+            let mut spin_count = 0u32;
+            const TIER1_SPINS: u32 = 100;
+            const TIER2_SPINS: u32 = 2000;
+            const TIMEOUT_SPINS: u32 = 200_000; // ~ 10ms at 2GHz
             
             while std::ptr::read_volatile(&header.response) != omni_shared::RSP_DONE {
                 spin_count += 1;
-                if spin_count < 2000 {
-                    std::hint::spin_loop();
+                if spin_count < TIER1_SPINS {
+                    // Hot spin — fastest response
+                } else if spin_count < TIER2_SPINS {
+                    std::hint::spin_loop(); // PAUSE instruction — reduces power + pipeline stall
                 } else {
-                    std::thread::yield_now();
+                    std::thread::yield_now(); // OS-level yield
                 }
                 if spin_count > TIMEOUT_SPINS {
-                    // Timeout (Plugin hung or crashed)
-                    // eprintln!("[PluginNode] Timeout waiting for plugin!");
-                    // Detect potential crash
-                    return;
+                    return; // Plugin hung or crashed
                 }
             }
             

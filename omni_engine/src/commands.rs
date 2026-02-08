@@ -87,4 +87,9 @@ pub enum EngineCommand {
     
     // Sync recorded clips to engine project
     AddArrangementClips { clips: Vec<(usize, omni_shared::project::ArrangementClip)> },
+    
+    // Time Signature & Groove
+    SetTimeSignature { numerator: u8, denominator: u8 },
+    SetGroove(omni_shared::project::GrooveTemplate),
+    SetSwing(f32), // Shortcut: sets MPC-style swing 0.0-1.0
 }
