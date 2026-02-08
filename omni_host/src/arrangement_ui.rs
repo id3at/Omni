@@ -9,6 +9,7 @@ pub struct WaveformCache {
     pub _asset_id: u32,
     pub samples_per_peak: usize,
     pub peaks: Vec<(f32, f32)>, // (min, max) per pixel/column
+    pub width: f32, // Cache invalidation if width changes drastically? No, samples_per_peak covers it.
 }
 
 pub struct ArrangementUI {
@@ -332,7 +333,7 @@ impl ArrangementUI {
                             
                             // Check cache
                             let cache_valid = self.waveform_cache.get(&asset_id)
-                                .map(|c| c.samples_per_peak == samples_per_pixel)
+                                .map(|c| c.samples_per_peak == samples_per_pixel && (c.width - width).abs() < 1.0)
                                 .unwrap_or(false);
                             
                             // Generate cache if needed
@@ -344,8 +345,9 @@ impl ArrangementUI {
                                     
                                     while idx < data.len() {
                                         let chunk_end = (idx + samples_per_pixel).min(data.len());
-                                        let mut min_v = 0.0_f32;
-                                        let mut max_v = 0.0_f32;
+                                        let first_sample = data[idx];
+                                        let mut min_v = first_sample;
+                                        let mut max_v = first_sample;
                                         
                                         // Stride for very large chunks
                                         let stride = if samples_per_pixel > 100 { samples_per_pixel / 50 } else { 1 };
@@ -358,10 +360,18 @@ impl ArrangementUI {
                                         idx += samples_per_pixel;
                                     }
                                     
+                                    
+                                    eprintln!("[UI] Generated Waveform Cache for Asset {}: width={}, samples_per_pixel={}, peaks_len={}. First peak: ({}, {})", 
+                                        asset_id, width, samples_per_pixel, peaks.len(), 
+                                        peaks.first().map(|p| p.0).unwrap_or(0.0), 
+                                        peaks.first().map(|p| p.1).unwrap_or(0.0)
+                                    );
+                                    
                                     self.waveform_cache.insert(asset_id, WaveformCache {
                                         _asset_id: asset_id,
                                         samples_per_peak: samples_per_pixel,
                                         peaks,
+                                        width,
                                     });
                                 }
                             }
@@ -374,11 +384,33 @@ impl ArrangementUI {
                                 let center_y = clip_rect.center().y;
                                 let height = clip_rect.height();
                                 
+                                // DEBUG: Throttle log
+                                if num_peaks > 0 && start_peak == 0 { 
+                                     // static mut LAST_DRAW_LOG: u64 = 0;
+                                     // Use simple random skip or just print once per asset?
+                                     // Let's print first peak values
+                                     // eprintln!("[UI] Drawing Waveform: Asset={}, Peaks={}, First=({}, {})", asset_id, num_peaks, cache.peaks[0].0, cache.peaks[0].1);
+                                }
+
                                 for px in 0..num_peaks {
                                     if let Some(&(min_v, max_v)) = cache.peaks.get(start_peak + px) {
                                         let x = clip_rect.min.x + px as f32;
-                                        let y_min = center_y + (min_v * height * 0.45);
-                                        let y_max = center_y + (max_v * height * 0.45);
+                                        // Scale height!
+                                        // If signal is -0.02 to 0.02, and height is 60.
+                                        // 0.02 * 60 * 0.45 = 0.54 pixels.
+                                        // This is < 1 pixel. might be invisible if antialiased or clamped.
+                                        // AUTO-SCALE or normalize?
+                                        
+                                        // For now, let's boost visual gain implicitly or ensure min height.
+                                        let mut y_min = center_y + (min_v * height * 0.45);
+                                        let mut y_max = center_y + (max_v * height * 0.45);
+                                        
+                                        // Ensure at least 1px height if peak exists
+                                        if (y_max - y_min).abs() < 1.0 {
+                                            y_min = center_y - 0.5;
+                                            y_max = center_y + 0.5;
+                                        }
+
                                         painter.line_segment([egui::pos2(x, y_min), egui::pos2(x, y_max)], (1.0, color));
                                     }
                                 }

@@ -84,4 +84,7 @@ pub enum EngineCommand {
     // Recording Session to Arrangement
     StartRecording,
     StopRecording { response_tx: Sender<Vec<(usize, omni_shared::project::ArrangementClip)>> }, // Returns (track_idx, clip) pairs
+    
+    // Sync recorded clips to engine project
+    AddArrangementClips { clips: Vec<(usize, omni_shared::project::ArrangementClip)> },
 }

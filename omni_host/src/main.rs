@@ -426,13 +426,16 @@ impl eframe::App for OmniApp {
                         
                         // Block and wait for created clips (should be fast)
                         if let Ok(new_clips) = rx.recv() {
-                            for (track_idx, clip) in new_clips {
-                                if track_idx < self.tracks.len() {
-                                    self.tracks[track_idx].arrangement.clips.push(clip);
+                            for (track_idx, clip) in &new_clips {
+                                if *track_idx < self.tracks.len() {
+                                    self.tracks[*track_idx].arrangement.clips.push(clip.clone());
                                 }
                             }
+                            // Sync clips to engine's project state for playback
+                            let _ = self.messenger.send(EngineCommand::AddArrangementClips { clips: new_clips });
                             // Auto-switch to Arrangement View to show result
                             self.show_arrangement_view = true;
+                            let _ = self.messenger.send(EngineCommand::SetArrangementMode(true));
                         }
                     }
                 }
@@ -626,6 +629,7 @@ impl eframe::App for OmniApp {
 
                 if view_resp.clicked() {
                     self.show_arrangement_view = !self.show_arrangement_view;
+                    let _ = self.messenger.send(EngineCommand::SetArrangementMode(self.show_arrangement_view));
                 }
             });
         });

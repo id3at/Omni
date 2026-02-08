@@ -1,3 +1,4 @@
+use ringbuf::HeapProd;
 use omni_shared::{MidiNoteEvent, ExpressionEvent, ParameterEvent, MAX_EXPRESSION_EVENTS, MAX_PARAM_EVENTS};
 
 pub struct AudioBuffers {
@@ -8,7 +9,8 @@ pub struct AudioBuffers {
     pub track_expression_events: Vec<Vec<ExpressionEvent>>,
     pub track_param_events: Vec<Vec<ParameterEvent>>,
     pub master_mix: Vec<f32>,
-    pub recording_bufs: Vec<Vec<f32>>, // Per-track recording buffers
+    // Real-Time Safety: Use RingBuffer Producers instead of Vec
+    pub recording_producers: Vec<Option<HeapProd<f32>>>,
 }
 
 impl AudioBuffers {
@@ -21,7 +23,7 @@ impl AudioBuffers {
             track_expression_events: vec![Vec::with_capacity(MAX_EXPRESSION_EVENTS); max_tracks],
             track_param_events: vec![Vec::with_capacity(MAX_PARAM_EVENTS); max_tracks],
             master_mix: vec![0.0; buffer_size],
-            recording_bufs: vec![Vec::new(); max_tracks],
+            recording_producers: (0..max_tracks).map(|_| None).collect(),
         }
     }
 

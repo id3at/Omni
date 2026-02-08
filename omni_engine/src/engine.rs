@@ -3,7 +3,11 @@ use crate::graph::AudioGraph;
 use crate::nodes::{GainNode}; 
 
 use crate::sequencer::{Sequencer, StepGenerator};
-use crate::assets::AudioPool; // Added
+use crate::assets::AudioPool;
+use crate::recorder::{AudioRecorder, RecorderCommand};
+use ringbuf::HeapRb;
+use std::thread;
+use ringbuf::traits::*; // Added to bring Split, Producer, Consumer into scope
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender};
 use omni_shared::project::{Project, Track};
@@ -27,6 +31,8 @@ pub struct AudioEngine {
     pub sample_rate: u32,
     pub audio_pool: Arc<ArcSwap<AudioPool>>,
     pub drop_tx: Sender<Box<dyn AudioNode>>, // Off-thread dropping
+    #[allow(dead_code)]
+    recorder_cmd_tx: Sender<RecorderCommand>, // Added
 }
 
 
@@ -38,9 +44,35 @@ impl AudioEngine {
     pub fn new(command_rx: Receiver<EngineCommand>, drop_tx: Sender<Box<dyn AudioNode>>) -> Result<Self, anyhow::Error> {
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or(anyhow::anyhow!("No output device available"))?;
+        
+        // Setup Audio Pool (Shared)
+        let audio_pool = Arc::new(ArcSwap::from_pointee(AudioPool::new()));
+        
+        // Setup Recorder
+        let (recorder_cmd_tx, recorder_cmd_rx) = crossbeam_channel::unbounded();
+        let recorder_pool_ref = audio_pool.clone();
+        // Get sample rate first
         let config = device.default_output_config()?;
+        // I suspect config.sample_rate() returns SampleRate, but error says u32?
+        // Let's assume CPAL 0.15 where SampleRate is u32 wrapper.
+        // Why compiler says u32?
+        // Maybe config.sample_rate() returns the inner u32? No.
+        // Maybe I am looking at WRONG line?
+        // Error: 54:48 `config.sample_rate().0`.
+        // If `config.sample_rate()` is `u32`.
+        // Then `let sample_rate = config.sample_rate();`
+        // Then `let sample_rate_val = sample_rate as f32;`
         
         let sample_rate = config.sample_rate();
+        let sample_rate_val = sample_rate as f32;
+
+        thread::spawn(move || {
+            let mut rec = AudioRecorder::new(recorder_cmd_rx, recorder_pool_ref, sample_rate_val);
+            rec.run();
+        });
+
+        // Clone for closure
+        let recorder_tx_clone = recorder_cmd_tx.clone();
         let channels = config.channels() as usize;
         let sample_format = config.sample_format();
 
@@ -69,8 +101,7 @@ impl AudioEngine {
         let master_gain_callback = master_gain.clone();
         let current_step_callback = current_step.clone();
         
-        // Audio Pool
-        let audio_pool = Arc::new(ArcSwap::from_pointee(AudioPool::new()));
+        // Audio Pool - use the same pool as the Recorder thread
         let pool_for_callback = audio_pool.clone(); // Clone for audio thread
 
         // Owned State for Audio Thread
@@ -96,6 +127,20 @@ impl AudioEngine {
         let max_buffer_size = 2048 * 2;
         let mut audio_buffers = crate::mixer::AudioBuffers::new(max_tracks, max_buffer_size);
 
+        // Initialize Recording Buffers (Zero-Allocation)
+        // One RingBuffer per track. Producer -> Header, Consumer -> Recorder Thread.
+        for i in 0..max_tracks {
+            let rb = HeapRb::<f32>::new(65536); // ~1.5s buffer at 48k
+            let (prod, cons) = rb.split();
+            audio_buffers.recording_producers[i] = Some(prod);
+            // Send Consumer to Recorder
+            // Note: try_send because unlimited channel but good practice
+            recorder_cmd_tx.send(RecorderCommand::AddTrack { 
+                track_index: i, 
+                consumer: cons 
+            }).ok();
+        }
+
         // PDC Delays
         let mut track_delays: Vec<crate::delay::DelayLine> = Vec::new();
         
@@ -105,6 +150,10 @@ impl AudioEngine {
         // (Since audio_buffers.prepare_buffers clears the main event vector)
         let mut local_param_events: Vec<Vec<omni_shared::ParameterEvent>> = vec![vec![]; max_tracks];
         let drop_tx_struct = drop_tx.clone();
+        
+        // Clone Arcs for the struct, so the originals can be moved into the closure
+        let is_recording_struct = is_recording.clone();
+        let recording_start_sample_struct = recording_start_sample.clone();
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => device.build_output_stream(
@@ -186,82 +235,28 @@ impl AudioEngine {
                                     }
                                 }
                             }
-                            EngineCommand::StartRecording => {
-                                // Start recording to Arrangement
-                                // Reset playhead to 0 for simpler UX - recordings always start at 0
-                                pos_counter.store(0, Ordering::Relaxed);
-                                record_flag.store(true, Ordering::Relaxed);
-                                rec_start_counter.store(0, Ordering::Relaxed);
+                            EngineCommand::StartRecording => { 
+                                is_recording.store(true, Ordering::Relaxed);
+                                let start_val = pos_counter.load(Ordering::Relaxed);
+                                recording_start_sample.store(start_val, Ordering::Relaxed);
                                 
-                                // Clear recording buffers
-                                for buf in audio_buffers.recording_bufs.iter_mut() {
-                                    buf.clear();
-                                }
-                                
-                                // Clear previous recorded clips from arrangement (optional - prevents overlap)
-                                // This provides a "fresh recording" each time
-                                for track in project.tracks.iter_mut() {
-                                    track.arrangement.clips.retain(|clip| !clip.name.starts_with("Recorded_"));
-                                }
-                                
-                                eprintln!("[Engine] Recording Started. Playhead reset to 0.");
-                            }
+                                // Real-Time Safety: Send command to Recorder Thread
+                                recorder_tx_clone.send(RecorderCommand::Clear).ok();
+                                recorder_tx_clone.send(RecorderCommand::Start).ok();
+                            },
                             EngineCommand::StopRecording { response_tx } => {
-                                // Stop recording and finalize
-                                record_flag.store(false, Ordering::Relaxed);
-                                let rec_start = rec_start_counter.load(Ordering::Relaxed);
-                                eprintln!("[Engine] Recording Stopped. Start: {}, Processing {} tracks...", rec_start, audio_buffers.recording_bufs.len());
-                                
-                                let mut created_clips: Vec<(usize, omni_shared::project::ArrangementClip)> = Vec::new();
-                                
-                                // RCU: Load, Clone, Modify, Store
-                                // We do this ONCE for all new assets to avoid multiple atomic swaps
-                                let current_pool = pool_for_callback.load();
-                                let mut new_pool_map = (**current_pool).clone();
-                                
-                                // Finalize: Convert recording buffers to AudioAssets and ArrangementClips
-                                for (track_idx, rec_buf) in audio_buffers.recording_bufs.iter_mut().enumerate() {
-                                    if !rec_buf.is_empty() {
-                                        // Create AudioAsset from recorded data
-                                        let asset_data = std::mem::take(rec_buf);
-                                        let asset_len = asset_data.len();
-                                        
-                                        // Add to local clone of pool
-                                        let asset_id = new_pool_map.add_asset_from_data(asset_data, sample_rate as f32);
-                                        
-                                        eprintln!("[Engine] Track {} : Created Asset {} from {} samples", track_idx, asset_id, asset_len);
-                                        
-                                        // Create ArrangementClip
-                                        let clip = omni_shared::project::ArrangementClip {
-                                            source_id: asset_id,
-                                            start_time: omni_shared::project::Timestamp { samples: rec_start, fractional: 0.0 },
-                                            start_offset: omni_shared::project::Timestamp::default(),
-                                            length: omni_shared::project::Timestamp { samples: asset_len as u64, fractional: 0.0 },
-                                            name: format!("Recorded_{}", asset_id),
-                                            selected: false,
-                                            warp_markers: Vec::new(),
-                                            stretch: false,
-                                            stretch_ratio: 1.0,
-                                            original_bpm: project.bpm,
-                                            cached_id: None,
-                                        };
-                                        
-                                        // Add to internal project
-                                        if let Some(track) = project.tracks.get_mut(track_idx) {
-                                            track.arrangement.clips.push(clip.clone());
-                                            eprintln!("[Engine] Track {} : Created ArrangementClip starting at sample {}", track_idx, rec_start);
-                                        }
-                                        
-                                        // Collect for response
-                                        created_clips.push((track_idx, clip));
+                                is_recording.store(false, Ordering::Relaxed);
+                                let start_val = recording_start_sample.load(Ordering::Relaxed);
+                                // Real-Time Safety: Delegate to Recorder Thread
+                                recorder_tx_clone.send(RecorderCommand::Stop { response_tx, rec_start_sample: start_val }).ok();
+                            }
+                            EngineCommand::AddArrangementClips { clips } => {
+                                for (track_idx, clip) in clips {
+                                    if track_idx < project.tracks.len() {
+                                        project.tracks[track_idx].arrangement.clips.push(clip);
                                     }
                                 }
-                                
-                                // Apply updates to pool atomically
-                                pool_for_callback.store(Arc::new(new_pool_map));
-                                
-                                // Send created clips back to UI
-                                let _ = response_tx.send(created_clips);
+                                eprintln!("[Engine] Added arrangement clips to project");
                             }
                             EngineCommand::SetPluginParam { track_index, id, value } => {
                                 // 1. Update Engine Node (Cache Only)
@@ -1426,12 +1421,29 @@ impl AudioEngine {
                          }
                          
                          for t_idx in 0..track_count {
-                             // Downmix stereo to mono for recording buffer
-                             for i in 0..frames {
-                                 let mono = (audio_buffers.track_bufs[t_idx][i * 2] + audio_buffers.track_bufs[t_idx][i * 2 + 1]) * 0.5;
-                                 audio_buffers.recording_bufs[t_idx].push(mono);
-                             }
-                         }
+                                // Downmix stereo to mono for recording buffer (RingBuffer Push)
+                                if let Some(prod_opt) = &mut audio_buffers.recording_producers[t_idx] {
+                                    let prod: &mut ringbuf::HeapProd<f32> = prod_opt;
+                                    let mut dropped = 0;
+                                    let mut signal = false;
+                                    
+                                    for i in 0..frames {
+                                        let mono = (audio_buffers.track_bufs[t_idx][i * 2] + audio_buffers.track_bufs[t_idx][i * 2 + 1]) * 0.5;
+                                        if mono.abs() > 0.001 { signal = true; }
+                                        if prod.try_push(mono).is_err() {
+                                            dropped += 1;
+                                        }
+                                    }
+                                    
+                                    // Debug Log (Throttled)
+                                    static mut LAST_REC_DEBUG: u64 = 0;
+                                    let pos = pos_counter.load(Ordering::Relaxed);
+                                    if unsafe { pos.saturating_sub(LAST_REC_DEBUG) > sample_rate as u64 * 2 } && (signal || dropped > 0) {
+                                        eprintln!("[Engine] Rec Track {}: Signal={}, Dropped={}, Frames={}", t_idx, signal, dropped, frames);
+                                        unsafe { LAST_REC_DEBUG = pos; }
+                                    }
+                                }
+                            }
                      }
                      if playing {
                          pos_counter.fetch_add(frames as u64, Ordering::Relaxed);
@@ -1463,14 +1475,15 @@ impl AudioEngine {
         Ok(Self {
             _stream: stream,
             is_playing,
-            is_recording,
+            is_recording: is_recording_struct,
             sample_position,
-            recording_start_sample,
+            recording_start_sample: recording_start_sample_struct,
             _sequencer: Sequencer::new(120.0), // Placeholder
             current_step,
             sample_rate,
             audio_pool,
             drop_tx: drop_tx_struct,
+            recorder_cmd_tx,
         })
     }
 

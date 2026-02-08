@@ -13,3 +13,4 @@ pub mod engine; // AudioEngine lives here
 // Re-exports
 pub use commands::EngineCommand;
 pub use engine::AudioEngine;
+pub mod recorder;
